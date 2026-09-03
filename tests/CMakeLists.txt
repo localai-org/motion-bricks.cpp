@@ -87,6 +87,19 @@ if(MOTIONBRICKS_GO_EXECUTABLE AND NOT MOTIONBRICKS_SANITIZE)
     endif()
 endif()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c "import numpy, safetensors"
+        RESULT_VARIABLE MOTIONBRICKS_SESSION_TEST_DEPS)
+    if(MOTIONBRICKS_SESSION_TEST_DEPS EQUAL 0)
+        add_test(NAME motionbricks-reference-session-tools
+            COMMAND "${Python3_EXECUTABLE}" -m unittest reference/test_session_tools.py)
+        set_tests_properties(motionbricks-reference-session-tools PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    endif()
+endif()
+
 if(MOTIONBRICKS_SANITIZE)
     foreach(target
             motionbricks-c-api-test

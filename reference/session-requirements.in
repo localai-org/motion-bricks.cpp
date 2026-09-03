@@ -1,0 +1,19 @@
+# Direct dependencies of the pinned upstream MotionBricks navigation demo.
+# PyTorch 2.7.0+cu128 constrains resolution but is supplied by the immutable
+# Blackwell-capable base.
+# The checked-in lock omits torch, triton, and NVIDIA packages owned by that
+# base image while pinning every package layered on top of it.
+torch==2.7.0
+adam-atan2-pytorch==0.4.0
+colorlog==6.9.0
+hydra-core==1.3.2
+matplotlib==3.10.6
+mujoco==3.3.5
+numpy==1.26.4
+omegaconf==2.3.0
+pynput==1.8.1
+pytorch-lightning==2.5.5
+safetensors==0.6.2
+scipy==1.15.3
+transformers==4.56.0
+vector-quantize-pytorch==1.23.2

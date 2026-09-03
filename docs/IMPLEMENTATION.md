@@ -46,8 +46,17 @@ within small F32 tolerances. The demo has native HTTP integration coverage and
 a headless-Chromium test that performs real inference, changes style and
 direction, renders all 34 bones, and captures a screenshot.
 
+The first two automated-session gates now have a pinned CUDA image, a
+fresh-process 345-frame scripted driver, compact public-boundary Safetensors
+capture, a three-run repeatability comparator, and CPU-only tooling tests. The
+accepted baseline was captured with PyTorch 2.7.0+cu128 on an RTX 5070 Ti from
+three fresh processes. All 14 planning events, JSON/discrete outputs, and CUDA
+float tensors matched exactly across all run pairs (zero measured drift). The
+generated 12 MiB baseline remains under the ignored `generated/` directory;
+the checked-in harness and pinned image definition reproduce it.
+
 Still outstanding from the wider plan are direct Kimodo GLB style import,
-recorded upstream controller/session fixtures, context-output blending,
+context-output blending,
 Gumbel sampling, graph/buffer caching and performance work, binary browser
 streaming, fuzzing, and optimized weight formats. The human-led
 `motions-bricks.md` remains unchanged.
