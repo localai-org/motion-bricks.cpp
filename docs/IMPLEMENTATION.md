@@ -38,11 +38,13 @@ representation conversion, original G1 style assets, spring-based target
 construction, stateful agent, and public skeletal outputs are implemented.
 The reusable PureGo binding, local Go session server, and embedded Three.js G1
 skeleton viewer are also implemented. The viewer supports directional
-steering, independent facing changes, and all converted upstream styles.
+steering relative to the current camera yaw, independent facing changes, and
+all converted upstream styles.
 
-The deterministic component fixtures pass against upstream PyTorch on CPU;
-CPU and Vulkan preserve duration and pose-token choices and agree end to end
-within small F32 tolerances. The demo has native HTTP integration coverage and
+The deterministic component fixtures pass against upstream PyTorch on CPU.
+The accepted CUDA session now also has non-interfering root/pose/VQ/composition
+traces for every plan; a zero-tolerance core comparison proves that enabling
+the hooks changes no public result. The demo has native HTTP integration coverage and
 a headless-Chromium test that performs real inference, changes style and
 direction, renders all 34 bones, and captures a screenshot.
 
@@ -54,6 +56,35 @@ three fresh processes. All 14 planning events, JSON/discrete outputs, and CUDA
 float tensors matched exactly across all run pairs (zero measured drift). The
 generated 12 MiB baseline remains under the ignored `generated/` directory;
 the checked-in harness and pinned image definition reproduce it.
+
+The open-loop native plan gate is also implemented. All 14 replans are packed
+with their recorded public context, command/style/seed, expected unblended
+motion, placed targets, and FK results. A checked C++ runner evaluates each
+plan independently, writes aggregate/per-plan JSON and optional neural traces,
+and feeds an upstream/native Three.js overlay with joint-error vectors. This
+gate found and fixed canonical world restoration, position-spring half-life,
+idle targets, source-context realignment, all-frame decoder conditioning, and
+the virtual-joint canonicalization adapter.
+
+Strict CPU parity uses an upstream PyTorch CPU replay of the exact accepted
+sparse neural inputs. It passes all 14 plans without `--report-only`: duration
+is exact, target FK stays within 4.5 micrometres, and worst output errors are
+0.20 mm at the root, 0.23 mm by FK, and 0.034 degrees locally. The original
+CUDA animation remains a separate observational oracle. Its 16-layer pose
+transformer has backend-sensitive near-tie logits: upstream PyTorch itself
+chooses 23 of 1,136 pose codes differently on CPU than CUDA, despite using
+`highest` F32 matmul precision with TF32 disabled. That cross-device report is
+retained as a diagnostic rather than weakening the strict CPU thresholds.
+
+The F32 Vulkan path now has an opt-in, hardware-tagged all-plan gate. On an
+NVIDIA GeForce RTX 5070 Ti with driver 595.71.05, two fresh Vulkan reports were
+byte-identical. Against the CPU runtime, all 14 durations and all 1,136 pose
+codes match; worst public-output differences are 0.028 mm root, 0.041 mm FK,
+and 0.0121 degrees local rotation, with identical placed targets. The direct
+backend ceilings (1 mm / 2 mm / 0.2 degrees) allow bounded accumulated
+arithmetic error while remaining ten times tighter than the upstream behavior
+gate. Camera-relative pad and WASD control is covered before and after a real
+headless-browser orbit.
 
 Still outstanding from the wider plan are direct Kimodo GLB style import,
 context-output blending,
@@ -767,7 +798,8 @@ Kimodo-authored style, with no Python process at runtime.
 
 - Enable GGML Vulkan and select the intended GPU through runtime configuration.
 - Match every component and end-to-end fixture using Vulkan-specific
-  tolerances.
+  tolerances. The F32 correctness/parity gate is complete on the recorded RTX
+  5070 Ti configuration; portability runs on other devices remain useful.
 - Profile allocation, upload, graph construction, inference, and WebSocket
   latency; cache graphs/buffers where safe.
 - Establish a replan cadence the machine sustains while playback remains

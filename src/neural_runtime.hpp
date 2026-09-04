@@ -28,9 +28,9 @@ mb_status create_neural_runtime(const std::filesystem::path & bundle,
 ggml_backend_t neural_backend(const neural_runtime & runtime) noexcept;
 ggml_tensor * neural_weight(const neural_runtime & runtime,
                             std::string_view component, std::string_view name) noexcept;
+#endif
 bool neural_copy_f32(const neural_runtime & runtime,
                      std::string_view component, std::string_view name,
                      std::vector<float> & output, std::string & reason);
-#endif
 
 } // namespace motionbricks::detail

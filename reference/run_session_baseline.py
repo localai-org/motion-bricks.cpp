@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--max-abs", type=float, default=1e-5)
     parser.add_argument("--max-relative-l2", type=float, default=1e-6)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--trace-targets", action="store_true")
     args = parser.parse_args()
 
     if os.environ.get("MOTIONBRICKS_REFERENCE_CONTAINER") != "1":
@@ -52,17 +53,17 @@ def main() -> None:
     try:
         for index in range(args.repeats):
             destination = staging / f"run-{index:03d}"
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(script_dir / "capture_session.py"),
-                    "--upstream-root", str(args.upstream_root.resolve()),
-                    "--output", str(destination),
-                    "--seed", str(args.seed),
-                    "--artifact-limit-mb", str(args.artifact_limit_mb),
-                ],
-                check=True,
-            )
+            command = [
+                sys.executable,
+                str(script_dir / "capture_session.py"),
+                "--upstream-root", str(args.upstream_root.resolve()),
+                "--output", str(destination),
+                "--seed", str(args.seed),
+                "--artifact-limit-mb", str(args.artifact_limit_mb),
+            ]
+            if args.trace_targets:
+                command.append("--trace-targets")
+            subprocess.run(command, check=True)
             captures.append(destination)
 
         subprocess.run(

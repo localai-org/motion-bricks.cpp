@@ -1,6 +1,9 @@
 #include <motionbricks/motionbricks.h>
 
+#include "session_replay.hpp"
+
 #include <array>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string_view>
@@ -44,6 +47,28 @@ int inspect(const char * directory) {
     return 0;
 }
 
+int replay_info(const char * path) {
+    try {
+        const auto replay = motionbricks::replay::load(path);
+        const auto * first = replay.frame_joints(0);
+        const auto * last = replay.frame_joints(replay.frame_count - 1);
+        std::cout << "format: motionbricks-portable-replay-v1\n"
+                  << "fps: " << replay.fps << '\n'
+                  << "frames: " << replay.frame_count << '\n'
+                  << "joints: " << replay.joint_count << '\n'
+                  << "qpos: " << replay.qpos_count << '\n'
+                  << "plans: " << replay.plan_count << '\n'
+                  << "target-frames: " << motionbricks::replay::target_frames << '\n'
+                  << std::setprecision(9)
+                  << "first-root: " << first[0] << ' ' << first[1] << ' ' << first[2] << '\n'
+                  << "last-root: " << last[0] << ' ' << last[1] << ' ' << last[2] << '\n';
+        return 0;
+    } catch (const std::exception & error) {
+        std::cerr << "replay load failed: " << error.what() << '\n';
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -52,7 +77,8 @@ int main(int argc, char ** argv) {
         return 0;
     }
     if (argc == 3 && std::string_view(argv[1]) == "inspect") return inspect(argv[2]);
+    if (argc == 3 && std::string_view(argv[1]) == "replay-info") return replay_info(argv[2]);
 
-    std::cerr << "usage: motionbricks-cli abi | inspect BUNDLE_DIRECTORY\n";
+    std::cerr << "usage: motionbricks-cli abi | inspect BUNDLE_DIRECTORY | replay-info REPLAY_FILE\n";
     return 2;
 }

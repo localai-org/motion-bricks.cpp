@@ -177,12 +177,219 @@ pair of repeated CUDA runs must remain within `1e-5` maximum absolute error and
 `comparison.json`. These are repeatability limits, not the later
 PyTorch-to-C++ parity tolerances.
 
-The recorder has a 25 MiB per-run artifact ceiling and does not install hooks,
-edit upstream, render video, or access controller/model locals. Target poses,
-deep planning traces, C++ replay, and MuJoCo media belong to later gates.
+The base recorder has a 25 MiB per-run artifact ceiling and does not edit
+upstream, render video, or access neural-layer internals.
 
 Run the pure scenario and synthetic comparator tests without a GPU:
 
 ```sh
 nix develop --command python -m unittest reference/test_session_tools.py
 ```
+
+## Target trace and cross-runtime visual replay
+
+Add `--trace-targets` to the three-run command above and use a separate output
+directory such as `generated/session-traced`. The option installs one
+instance-local wrapper around the target-transform method. It invokes the
+original method first, then copies only its returned target tensors plus the
+spring inputs and canonical world origin/heading. The upstream checkout stays
+read-only and every public replan must produce exactly one boundary record.
+
+Verify that tracing did not affect accepted outputs at zero tolerance:
+
+```sh
+nix develop --command python reference/compare_session_captures.py \
+  generated/session-baseline/run-000 generated/session-traced/run-000 \
+  --core-only --max-abs 0 --max-relative-l2 0 \
+  --output generated/session-traced/non-interference.json
+```
+
+`--core-only` still compares the pinned upstream identity, scenario, seeds,
+demo flags, CUDA environment, JSON controls/events, qpos, model features, and
+all playback tensors. It permits the trace tensor superset and ignores only
+the changed harness identity and renderer OS-package inventory. The three
+traced runs are also compared in full, including every trace tensor.
+
+Build the shared replay artifact. The builder evaluates MuJoCo forward
+kinematics for the emitted qpos and restores every target from its per-plan
+canonical frame into world space:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" \
+  -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/build_session_replay.py \
+  --capture /work/generated/session-traced/run-000 \
+  --upstream-root /upstream \
+  --output /work/generated/session-replay
+
+./build/debug/bin/motionbricks-cli replay-info \
+  generated/session-replay/session.mbreplay
+```
+
+Render the authoritative upstream view and encode its 345 PNGs into an H.264
+MP4. Both commands refuse to replace an existing artifact directory/file:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" --entrypoint python \
+  -e MUJOCO_GL=osmesa -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" \
+  -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/render_session_replay.py \
+  --replay /work/generated/session-replay/session.mbreplay \
+  --manifest /work/generated/session-replay/manifest.json \
+  --upstream-root /upstream \
+  --output /work/generated/session-render
+
+nix develop --command ffmpeg -framerate 30 \
+  -i generated/session-render/frames/frame-%04d.png \
+  -c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart \
+  generated/session-render/upstream-mujoco.mp4
+```
+
+The MP4 and selected snapshots show the opaque upstream G1, four distinct
+target ghosts, the current target path, the recent animated-root trail, and
+frame/plan/mode overlays. Its camera follows the animated qpos root only.
+Start the Go/Three.js viewer with `-replay generated/session-replay/session.mbreplay`
+as documented in `docs/DEMO.md`; it consumes the identical binary without
+loading either planner. Generated captures, binaries, PNGs, and MP4s are
+intentionally ignored by Git.
+
+## Open-loop native parity
+
+Capture every neural boundary once, together with the already accepted target
+boundary. The upstream checkout remains read-only. Prove that these external
+wrappers and forward hooks do not perturb any public result:
+
+```sh
+docker run --rm --device=nvidia.com/gpu=all \
+  --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" \
+  -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/capture_session.py \
+  --upstream-root /upstream \
+  --output /work/generated/session-neural-all \
+  --seed 1234 --artifact-limit-mb 40 \
+  --trace-targets --trace-neural-all
+
+python reference/compare_session_captures.py \
+  generated/session-traced/run-000 generated/session-neural-all \
+  --core-only --max-abs 0 --max-relative-l2 0 \
+  --output generated/session-neural-all/non-interference.json
+```
+
+The demo's accepted observation was produced on CUDA. For strict CPU parity,
+replay those exact sparse inputs through the same upstream PyTorch models on
+CPU. The container initially loads the unmodified CUDA-only demo, then moves
+the inference modules to CPU before any replayed plan is evaluated:
+
+```sh
+docker run --rm --device=nvidia.com/gpu=all \
+  --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" \
+  -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/replay_inference_trace.py \
+  --upstream-root /upstream \
+  --capture /work/generated/session-neural-all \
+  --output /work/generated/upstream-cpu-replay
+```
+
+Build the compact fixture. MuJoCo is used only to adapt recorded qpos context
+to the public 34-joint contract; expected motion comes from the verified
+upstream CPU replay:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" \
+  -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/build_plan_parity.py \
+  --capture /work/generated/session-neural-all \
+  --upstream-root /upstream \
+  --support /work/generated/safe/support.safetensors \
+  --expected-replay /work/generated/upstream-cpu-replay \
+  --output /work/generated/open-loop-parity
+```
+
+Run all plans independently. Omitting `--report-only` makes this a real strict
+gate: any failed ceiling produces a nonzero exit. `--trace-directory` performs
+a separate diagnostic evaluation and writes one native trace per plan without
+changing the public C-API result used by the report:
+
+```sh
+./build/debug/bin/motionbricks-parity \
+  generated/open-loop-parity/open-loop.mbparity \
+  generated/g1-f32 generated/styles \
+  generated/open-loop-parity/cpu-report.json cpu \
+  --trace-directory generated/open-loop-parity/native-traces
+
+python reference/compare_neural_trace.py \
+  generated/session-neural-all generated/open-loop-parity/native-traces \
+  --output generated/open-loop-parity/boundary-comparison.json
+```
+
+The strict CPU report passes all 14 plans. Duration is exact, placed target FK
+matches within 4.5 micrometres, and worst output errors are 0.20 mm root,
+0.23 mm FK, and 0.034 degrees local rotation. This is well inside the unchanged
+10 mm / 20 mm / 2 degree ceilings.
+
+The original CUDA capture is retained as a separate cross-device observation.
+On the same captured pose inputs, upstream PyTorch 2.7 on CPU chooses 23 of
+1,136 pose codes differently from CUDA. TF32 is disabled and matmul precision
+is `highest`; the differences are ordinary accumulated backend arithmetic near
+discrete argmax ties. `replay_pose_trace.py` reproduces and records this fact.
+Accordingly, the CUDA boundary comparison is diagnostic and may remain red;
+it is not used to weaken or redefine strict CPU parity.
+
+### CPU/Vulkan parity
+
+Vulkan is compared to the strict CPU runtime rather than directly to the CUDA
+observation. Configure the opt-in hardware test with an explicit device and
+hardware tag, then run the complete suite, including the opt-in component and
+all-plan Vulkan gates:
+
+```sh
+cmake --preset debug \
+  -DMOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS=ON \
+  -DMOTIONBRICKS_VULKAN_PARITY_DEVICE=0 \
+  -DMOTIONBRICKS_VULKAN_PARITY_HARDWARE="NVIDIA GeForce RTX 5070 Ti" \
+  -DMOTIONBRICKS_VULKAN_PARITY_DRIVER=595.71.05
+cmake --build --preset debug
+ctest --test-dir build/debug --output-on-failure
+```
+
+The CPU and Vulkan runners both evaluate the 14-plan CPU-reference fixture and
+emit paired neural traces. `compare_plan_reports.py` checks exact durations and
+the public animation using direct backend ceilings of 1 mm root, 2 mm FK,
+0.2 degrees local rotation, 0.1 mm target root, 0.2 mm target FK, and
+0.05 degrees target rotation. These limits are at least an order of magnitude
+tighter than the main root/FK/rotation upstream-behavior gate, but allow errors
+to accumulate across each 24--44-frame decoded trajectory.
+
+On the NVIDIA GeForce RTX 5070 Ti with driver 595.71.05, two fresh Vulkan runs
+were byte-identical. All 14 durations and all 1,136 pose tokens matched CPU.
+Worst CPU/Vulkan differences were 0.028 mm root, 0.041 mm FK, and 0.0121 degrees
+local rotation; placed targets were identical. Continuous internal differences
+(up to 0.0299 duration-logit, 0.0228 pose-logit, and 0.00224 normalized decoder
+output) are recorded diagnostically and do not replace the observable-output
+gate.
+
+The fixture is open loop: each native plan receives the recorded four-frame
+upstream context, transformed into the public 34-joint animation contract.
+Consequently errors cannot compound from one plan into the next. The report
+compares duration exactly, roots by Euclidean distance, local XYZW rotations by
+sign-invariant angular distance, and skeleton/targets by FK position. The
+all-plan diagnostic additionally compares sparse inputs, root outputs, pose
+logits/tokens, decoder inputs, and decoder outputs.
+
+Start the report viewer with `-comparison` as documented in `docs/DEMO.md`.
+It overlays upstream and native rigs and draws a red vector for every joint's
+current positional error.

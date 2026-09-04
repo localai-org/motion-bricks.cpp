@@ -10,6 +10,12 @@ const showAllTargets = document.querySelector('#show-all-targets');
 const targetFrame = document.querySelector('#target-frame');
 const targetFrameLabel = document.querySelector('#target-frame-label');
 const resetCamera = document.querySelector('#reset-camera');
+const replayControls = document.querySelector('#replay-controls');
+const replayToggle = document.querySelector('#replay-toggle');
+const replayFrame = document.querySelector('#replay-frame');
+const replayFrameLabel = document.querySelector('#replay-frame-label');
+const comparisonPlanRow = document.querySelector('#comparison-plan-row');
+const comparisonPlan = document.querySelector('#comparison-plan');
 const query = new URLSearchParams(location.search);
 
 const state = {
@@ -17,7 +23,16 @@ const state = {
   lastTime: performance.now(), move: [0, 0], facing: [0, 1], keys: new Set(),
   padKey: '', pending: false, replanQueued: false, seed: 10, style: '', rig: null, targetRigs: [],
   generatedPath: null, targetPath: null,
+  replay: null, replayPlaying: true, replayPlan: -2,
+  comparison: null, comparisonPlan: -1, comparisonShowcase: null,
+  comparisonVisiblePlan: -1, nativeRig: null, errorLines: null,
 };
+
+const modeNames = [
+  'idle', 'slow_walk', 'walk', 'hand_crawling', 'walk_boxing', 'elbow_crawling',
+  'stealth_walk', 'injured_walk', 'walk_stealth', 'walk_happy_dance', 'walk_zombie',
+  'walk_gun', 'walk_scared', 'walk_left', 'walk_right',
+];
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x090b10, 0.045);
@@ -60,18 +75,18 @@ const midpoint = new THREE.Vector3();
 
 function labelSprite(text, color, opacity) {
   const canvas = document.createElement('canvas');
-  canvas.width = 128;
+  canvas.width = 256;
   canvas.height = 64;
   const context = canvas.getContext('2d');
   context.font = '700 30px system-ui';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillStyle = color;
-  context.fillText(text, 64, 32);
+  context.fillText(text, 128, 32);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({map: texture, transparent: true, opacity, depthTest: false}));
-  sprite.scale.set(0.32, 0.16, 1);
+  sprite.scale.set(0.5, 0.125, 1);
   sprite.renderOrder = 20;
   return sprite;
 }
@@ -86,6 +101,7 @@ class SkeletonRig {
     this.jointRadius = options.jointRadius;
     this.rootRadius = options.rootRadius;
     this.labelHeight = options.labelHeight ?? 0.34;
+    this.labelOffset = options.labelOffset ?? 0;
     this.boneMaterial = new THREE.MeshStandardMaterial({
       color: options.color, emissive: options.emissive, emissiveIntensity: options.emissiveIntensity,
       roughness: 0.42, transparent: options.opacity < 1, opacity: options.opacity,
@@ -141,6 +157,28 @@ class SkeletonRig {
     this.updateGeometry();
   }
 
+  poseWorld(positions, offset = 0) {
+    for (let joint = 0; joint < this.jointMeshes.length; joint++) {
+      const marker = this.jointMeshes[joint];
+      marker.position.fromArray(positions, offset + joint * 3);
+      marker.scale.setScalar(joint === 0 ? this.rootRadius : this.jointRadius);
+    }
+    for (const segment of this.segments) {
+      startPoint.copy(this.jointMeshes[segment.parent].position);
+      endPoint.copy(this.jointMeshes[segment.child].position);
+      direction.subVectors(endPoint, startPoint);
+      const length = direction.length();
+      midpoint.addVectors(startPoint, endPoint).multiplyScalar(0.5);
+      segment.mesh.position.copy(midpoint);
+      segment.mesh.quaternion.setFromUnitVectors(up, direction.normalize());
+      segment.mesh.scale.set(this.radius, length, this.radius);
+    }
+    if (this.label) {
+      endPoint.copy(this.jointMeshes[0].position);
+      this.label.position.set(endPoint.x + this.labelOffset, endPoint.y + this.labelHeight, endPoint.z);
+    }
+  }
+
   updateGeometry() {
     this.bones[0].updateMatrixWorld(true);
     for (let index = 0; index < this.bones.length; index++) {
@@ -162,7 +200,7 @@ class SkeletonRig {
     }
     if (this.label) {
       this.bones[0].getWorldPosition(endPoint);
-      this.label.position.set(endPoint.x, endPoint.y + this.labelHeight, endPoint.z);
+      this.label.position.set(endPoint.x + this.labelOffset, endPoint.y + this.labelHeight, endPoint.z);
     }
   }
 
@@ -209,17 +247,46 @@ function makeSkeletons(joints) {
     radius: 0.022, jointRadius: 0.034, rootRadius: 0.062,
     opacity: 1, diamonds: false, renderOrder: 5,
   });
+  const targetColors = [
+    {bone: 0xffc857, joint: 0xffdc8a, root: 0xffb703, emissive: 0x604000, label: '#ffd166'},
+    {bone: 0xff8c42, joint: 0xffb06b, root: 0xff6b1a, emissive: 0x6f2600, label: '#ff9a62'},
+    {bone: 0xf04452, joint: 0xff7b84, root: 0xd62839, emissive: 0x65000b, label: '#ff6975'},
+    {bone: 0xe11d9a, joint: 0xff71c8, root: 0xb40078, emissive: 0x5d003f, label: '#ff66c4'},
+  ];
   for (let frame = 0; frame < 4; frame++) {
+    const palette = targetColors[frame];
     state.targetRigs.push(new SkeletonRig(joints, {
-      color: 0xff763b, jointColor: 0xffb06b, rootColor: 0xff4f8b,
-      emissive: 0x7b1f00, rootEmissive: 0x790025, emissiveIntensity: 1,
+      color: palette.bone, jointColor: palette.joint, rootColor: palette.root,
+      emissive: palette.emissive, rootEmissive: palette.emissive, emissiveIntensity: 1,
       radius: 0.018, jointRadius: 0.032, rootRadius: 0.056, opacity: 0.9, diamonds: true,
-      renderOrder: 8 + frame, label: `T${frame}`, labelColor: frame === 3 ? '#ffb477' : '#c97354',
+      renderOrder: 8 + frame, label: `T${frame}`, labelColor: palette.label,
       labelHeight: 0.34 + (3 - frame) * 0.11,
     }));
   }
   state.generatedPath = makeLine(0x43e8bf);
   state.targetPath = makeLine(0xff6b3d, true);
+}
+
+function makeComparisonSkeletons(joints) {
+  state.rig = new SkeletonRig(joints, {
+    color: 0x55efc4, jointColor: 0xd9fff3, rootColor: 0xffd166,
+    emissive: 0x0c5b49, rootEmissive: 0x6a3b00, emissiveIntensity: 0.8,
+    radius: 0.018, jointRadius: 0.029, rootRadius: 0.055,
+    opacity: 0.82, diamonds: false, renderOrder: 5, label: 'UPSTREAM', labelColor: '#6fffd0', labelOffset: -0.22,
+  });
+  state.nativeRig = new SkeletonRig(joints, {
+    color: 0x65a9ff, jointColor: 0xd7e8ff, rootColor: 0xff5b8f,
+    emissive: 0x173d72, rootEmissive: 0x741536, emissiveIntensity: 0.9,
+    radius: 0.014, jointRadius: 0.024, rootRadius: 0.046,
+    opacity: 0.72, diamonds: true, renderOrder: 8, label: 'NATIVE', labelColor: '#7ab6ff', labelOffset: 0.22,
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(joints.length * 2 * 3), 3));
+  state.errorLines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({color: 0xff456f, transparent: true, opacity: 0.82}));
+  state.errorLines.renderOrder = 12;
+  scene.add(state.errorLines);
+  state.generatedPath = makeLine(0x55efc4);
+  state.targetPath = makeLine(0x65a9ff, true);
 }
 
 function updateTargetVisibility() {
@@ -250,6 +317,8 @@ function resetCameraView() {
   cameraView.yaw = 0.68;
   cameraView.pitch = 0.24;
   cameraView.distance = 4.8;
+  document.documentElement.dataset.cameraYaw = String(cameraView.yaw);
+  if (state.keys.size || state.padKey) { updateControl(); schedulePlan(35); }
 }
 resetCamera.addEventListener('click', resetCameraView);
 renderer.domElement.addEventListener('pointerdown', event => {
@@ -261,6 +330,8 @@ renderer.domElement.addEventListener('pointermove', event => {
   cameraView.yaw -= (event.clientX - cameraView.x) * 0.006;
   cameraView.pitch = THREE.MathUtils.clamp(cameraView.pitch + (event.clientY - cameraView.y) * 0.004, -0.05, 1.05);
   cameraView.x = event.clientX; cameraView.y = event.clientY;
+  document.documentElement.dataset.cameraYaw = String(cameraView.yaw);
+  if (state.keys.size || state.padKey) { updateControl(); schedulePlan(35); }
 });
 renderer.domElement.addEventListener('pointerup', event => {
   cameraView.dragging = false; renderer.domElement.releasePointerCapture(event.pointerId);
@@ -289,6 +360,60 @@ async function api(path, body) {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || `${response.status} ${response.statusText}`);
   return value;
+}
+
+async function loadReplay() {
+  const response = await fetch('/api/replay', {cache: 'no-store'});
+  if (!response.ok) throw new Error(`replay download failed: ${response.status} ${response.statusText}`);
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < 40) throw new Error('replay is shorter than its header');
+  const bytes = new Uint8Array(buffer);
+  const expectedMagic = [77, 66, 82, 80, 76, 89, 49, 0];
+  if (!expectedMagic.every((value, index) => bytes[index] === value)) throw new Error('unsupported replay magic');
+  if (new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] !== 4) throw new Error('big-endian browsers are unsupported');
+  const view = new DataView(buffer);
+  const header = Array.from({length: 8}, (_, index) => view.getUint32(8 + index * 4, true));
+  const [version, fps, frames, joints, qposCount, plans, targetFrames, flags] = header;
+  if (version !== 1 || flags !== 0 || targetFrames !== 4 || fps < 1 || fps > 1000 ||
+      frames < 1 || frames > 1_000_000 || joints < 1 || joints > 64 || qposCount < 1 || qposCount > 256 ||
+      plans < 1 || plans > frames) throw new Error('unsupported replay header');
+  let offset = 40;
+  const take = (Type, count, name) => {
+    const size = Type.BYTES_PER_ELEMENT * count;
+    if (!Number.isSafeInteger(count) || count < 0 || offset + size > buffer.byteLength) throw new Error(`replay is truncated in ${name}`);
+    const result = new Type(buffer, offset, count);
+    offset += size;
+    return result;
+  };
+  const replay = {
+    fps, frames, joints, qposCount, plans, targetFrames,
+    parents: take(Int32Array, joints, 'parents'),
+    modes: take(Int32Array, frames, 'modes'),
+    framePlans: take(Int32Array, frames, 'frame plans'),
+    qpos: take(Float32Array, frames * qposCount, 'qpos'),
+    jointPositions: take(Float32Array, frames * joints * 3, 'joint positions'),
+    planFrames: take(Uint32Array, plans, 'plan frames'),
+    planModes: take(Int32Array, plans, 'plan modes'),
+    planValidLengths: take(Uint32Array, plans, 'plan lengths'),
+    targetPositions: take(Float32Array, plans * targetFrames * joints * 3, 'target positions'),
+  };
+  if (offset !== buffer.byteLength) throw new Error(`replay has ${buffer.byteLength - offset} trailing bytes`);
+  if (replay.parents[0] !== -1) throw new Error('replay root parent must be -1');
+  for (let joint = 1; joint < joints; joint++) {
+    if (replay.parents[joint] < 0 || replay.parents[joint] >= joint) throw new Error('replay joint topology is invalid');
+  }
+  for (let frame = 0; frame < frames; frame++) {
+    if (replay.framePlans[frame] < -1 || replay.framePlans[frame] >= plans) throw new Error('replay frame plan is out of bounds');
+  }
+  for (let plan = 0; plan < plans; plan++) {
+    if (replay.planFrames[plan] >= frames || (plan && replay.planFrames[plan] <= replay.planFrames[plan - 1])) {
+      throw new Error('replay plan frames are invalid');
+    }
+  }
+  for (const values of [replay.qpos, replay.jointPositions, replay.targetPositions]) {
+    for (const value of values) if (!Number.isFinite(value)) throw new Error('replay contains a non-finite value');
+  }
+  return replay;
 }
 
 function installStyles(styles) {
@@ -349,16 +474,26 @@ async function requestPlan(advance = Math.floor(state.playhead)) {
   }
 }
 
+function cameraRelativeMovement(right, forward) {
+  const sine = Math.sin(cameraView.yaw), cosine = Math.cos(cameraView.yaw);
+  return [right * cosine - forward * sine, -right * sine - forward * cosine];
+}
+
 function updateControl() {
-  let x = 0, z = 0;
+  let right = 0, forward = 0;
   const active = key => state.keys.has(key) || state.padKey === key;
-  if (active('w')) z += 1;
-  if (active('s')) z -= 1;
-  if (active('a')) x -= 1;
-  if (active('d')) x += 1;
-  const length = Math.hypot(x, z);
-  if (length > 0) { x /= length; z /= length; state.facing = [x, z]; }
+  if (active('w')) forward += 1;
+  if (active('s')) forward -= 1;
+  if (active('a')) right -= 1;
+  if (active('d')) right += 1;
+  const length = Math.hypot(right, forward);
+  if (length > 0) { right /= length; forward /= length; }
+  const [x, z] = cameraRelativeMovement(right, forward);
+  if (length > 0) state.facing = [x, z];
   state.move = [x, z];
+  document.documentElement.dataset.controlRight = String(right);
+  document.documentElement.dataset.controlForward = String(forward);
+  document.documentElement.dataset.cameraYaw = String(cameraView.yaw);
   document.querySelectorAll('.pad button').forEach(button => {
     const pressed = active(button.dataset.key);
     button.classList.toggle('active', pressed);
@@ -419,17 +554,191 @@ function renderMotion(frame) {
   updateCamera();
 }
 
+function replayRootPath(values, frames, joints, base = 0) {
+  const roots = new Float32Array(frames * 3);
+  for (let frame = 0; frame < frames; frame++) {
+    const source = base + frame * joints * 3;
+    const triple = values.subarray ? values.subarray(source, source + 3) : values.slice(source, source + 3);
+    roots.set(triple, frame * 3);
+  }
+  return roots;
+}
+
+function buildComparisonShowcase(report) {
+  const firstWalk = report.plans.find(plan => plan.style === 'walk' && Array.isArray(plan.movement));
+  if (!firstWalk) return null;
+  const heading = Math.atan2(firstWalk.movement[0], firstWalk.movement[2]);
+  const angleFromHeading = plan => {
+    if (!Array.isArray(plan.movement)) return 0;
+    let difference = Math.atan2(plan.movement[0], plan.movement[2]) - heading;
+    while (difference > Math.PI) difference -= 2 * Math.PI;
+    while (difference < -Math.PI) difference += 2 * Math.PI;
+    return Math.abs(difference);
+  };
+  const definitions = [
+    {label: 'Forward walk', plans: report.plans.filter(plan => plan.style === 'walk' && angleFromHeading(plan) < Math.PI / 36)},
+    {label: 'Right turn', plans: report.plans.filter(plan => plan.style === 'walk' && angleFromHeading(plan) >= Math.PI / 36)},
+    {label: 'Zombie walk', plans: report.plans.filter(plan => plan.style === 'walk_zombie')},
+  ];
+  let cursor = 0;
+  const segments = [];
+  const slices = [];
+  for (const definition of definitions) {
+    if (!definition.plans.length) continue;
+    const segmentStart = cursor;
+    for (const plan of definition.plans) {
+      const reportIndex = report.plans.indexOf(plan);
+      const next = report.plans[reportIndex + 1];
+      const available = Math.min(plan.expected_frames, plan.actual_frames);
+      const untilNextPlan = next ? next.command_frame - plan.command_frame : available;
+      const frames = THREE.MathUtils.clamp(untilNextPlan, 1, available);
+      slices.push({start: cursor, frames, plan, label: definition.label});
+      cursor += frames;
+    }
+    segments.push({label: definition.label, start: segmentStart, frames: cursor - segmentStart});
+  }
+  return segments.length === 3 ? {frames: cursor, segments, slices} : null;
+}
+
+function comparisonPosition(frame) {
+  if (state.comparisonPlan >= 0) {
+    const plan = state.comparison.plans[state.comparisonPlan];
+    const frames = Math.min(plan.expected_frames, plan.actual_frames);
+    return {plan, index: THREE.MathUtils.clamp(frame, 0, frames - 1), frames,
+      label: null, sequenceFrame: frame};
+  }
+  const showcase = state.comparisonShowcase;
+  const sequenceFrame = THREE.MathUtils.clamp(frame, 0, showcase.frames - 1);
+  const slice = showcase.slices.find(item => sequenceFrame < item.start + item.frames) ?? showcase.slices.at(-1);
+  return {plan: slice.plan, index: sequenceFrame - slice.start, frames: showcase.frames,
+    label: slice.label, sequenceFrame};
+}
+
+function setComparisonPaths(plan) {
+  if (state.comparisonVisiblePlan === plan.index) return;
+  state.comparisonVisiblePlan = plan.index;
+  setGroundPath(state.generatedPath,
+    replayRootPath(plan.expected_joint_positions, plan.expected_frames, state.comparison.joints), plan.expected_frames);
+  setGroundPath(state.targetPath,
+    replayRootPath(plan.native_joint_positions, plan.actual_frames, state.comparison.joints), plan.actual_frames);
+}
+
+function renderComparison(frame) {
+  const report = state.comparison;
+  if (!report) return;
+  const position = comparisonPosition(frame);
+  const {plan, index} = position;
+  setComparisonPaths(plan);
+  const width = report.joints * 3;
+  const expectedOffset = index * width;
+  const nativeOffset = index * width;
+  state.rig.poseWorld(plan.expected_joint_positions, expectedOffset);
+  state.nativeRig.poseWorld(plan.native_joint_positions, nativeOffset);
+  const positions = state.errorLines.geometry.attributes.position.array;
+  let maximum = 0, square = 0;
+  for (let joint = 0; joint < report.joints; joint++) {
+    const expected = expectedOffset + joint * 3;
+    const native = nativeOffset + joint * 3;
+    const line = joint * 6;
+    let norm = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      positions[line + axis] = plan.expected_joint_positions[expected + axis];
+      positions[line + 3 + axis] = plan.native_joint_positions[native + axis];
+      const difference = positions[line + 3 + axis] - positions[line + axis];
+      norm += difference * difference;
+    }
+    maximum = Math.max(maximum, Math.sqrt(norm));
+    square += norm;
+  }
+  state.errorLines.geometry.attributes.position.needsUpdate = true;
+  const rootMetric = plan.metrics.root_m.max;
+  planInfo.textContent = position.label
+    ? `${position.label} · sequence ${position.sequenceFrame}/${position.frames - 1} · plan ${plan.index} frame ${index}`
+    : `plan ${plan.index} · ${plan.style.replaceAll('_', ' ')} · frame ${index}/${position.frames - 1}`;
+  targetInfo.textContent = `frame max ${formatDistance(maximum)} · RMS ${formatDistance(Math.sqrt(square / report.joints))}`;
+  statusElement.textContent = `${plan.duration_exact ? 'duration exact' : 'duration mismatch'} · root max ${formatDistance(rootMetric)}`;
+  replayFrame.value = String(position.sequenceFrame);
+  replayFrameLabel.textContent = `${position.sequenceFrame}/${position.frames - 1}`;
+  updateCamera();
+}
+
+function formatDistance(metres) {
+  return metres < 0.01 ? `${(metres * 1000).toFixed(1)} mm` : `${(metres * 100).toFixed(1)} cm`;
+}
+
+function renderReplay(frame) {
+  const replay = state.replay;
+  if (!replay) return;
+  const index = THREE.MathUtils.clamp(frame, 0, replay.frames - 1);
+  state.rig.poseWorld(replay.jointPositions, index * replay.joints * 3);
+  const plan = replay.framePlans[index];
+  if (plan !== state.replayPlan) {
+    state.replayPlan = plan;
+    if (plan >= 0) {
+      const planBase = plan * replay.targetFrames * replay.joints * 3;
+      for (let target = 0; target < replay.targetFrames; target++) {
+        state.targetRigs[target].poseWorld(replay.targetPositions, planBase + target * replay.joints * 3);
+      }
+      setGroundPath(state.targetPath, replayRootPath(replay.targetPositions, replay.targetFrames, replay.joints, planBase), replay.targetFrames);
+      state.targets = {frames: replay.targetFrames};
+    } else {
+      state.targets = {frames: 0};
+    }
+    updateTargetVisibility();
+  }
+  const mode = modeNames[replay.modes[index]] || `mode ${replay.modes[index]}`;
+  planInfo.textContent = plan >= 0
+    ? `frame ${index}/${replay.frames - 1} · plan ${plan} · ${mode.replaceAll('_', ' ')}`
+    : `frame ${index}/${replay.frames - 1} · pre-roll`;
+  replayFrame.value = String(index);
+  replayFrameLabel.textContent = `${index}/${replay.frames - 1}`;
+  updateCamera();
+}
+
 function animate(now) {
   requestAnimationFrame(animate);
   const delta = Math.min(0.1, (now - state.lastTime) / 1000);
   state.lastTime = now;
-  if (state.motion) {
+  if (state.comparison) {
+    const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
+      : Math.min(state.comparison.plans[state.comparisonPlan].expected_frames,
+        state.comparison.plans[state.comparisonPlan].actual_frames);
+    if (state.replayPlaying) state.playhead = (state.playhead + delta * state.comparison.fps) % frames;
+    renderComparison(Math.floor(state.playhead));
+  } else if (state.replay) {
+    if (state.replayPlaying) state.playhead = (state.playhead + delta * state.replay.fps) % state.replay.frames;
+    renderReplay(Math.floor(state.playhead));
+  } else if (state.motion) {
     state.playhead += delta * state.meta.fps;
     if (state.playhead >= state.motion.frames - 5 && !state.pending) void requestPlan(Math.floor(state.playhead));
     renderMotion(Math.floor(state.playhead));
   }
   renderer.render(scene, camera);
 }
+
+replayToggle.addEventListener('click', () => {
+  state.replayPlaying = !state.replayPlaying;
+  replayToggle.textContent = state.replayPlaying ? 'Pause' : 'Play';
+  state.lastTime = performance.now();
+});
+replayFrame.addEventListener('input', () => {
+  state.replayPlaying = false;
+  replayToggle.textContent = 'Play';
+  state.playhead = Number(replayFrame.value);
+  if (state.comparison) renderComparison(Math.floor(state.playhead));
+  else renderReplay(Math.floor(state.playhead));
+});
+
+comparisonPlan.addEventListener('change', () => {
+  state.comparisonPlan = Number(comparisonPlan.value);
+  state.playhead = 0;
+  const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
+    : Math.min(state.comparison.plans[state.comparisonPlan].expected_frames,
+      state.comparison.plans[state.comparisonPlan].actual_frames);
+  replayFrame.max = String(frames - 1);
+  state.comparisonVisiblePlan = -1;
+  renderComparison(0);
+});
 
 async function selfTest() {
   const alternate = state.meta.styles.find(item => item.name === 'walk_zombie') || state.meta.styles.find(item => item.name !== 'walk');
@@ -477,9 +786,156 @@ async function selfTest() {
   testResult.textContent = `Headless check passed: animated-camera anchor + target inspector/overlay, ${alternate.name}, right turn`;
 }
 
+async function replaySelfTest() {
+  const replay = state.replay;
+  state.replayPlaying = false;
+  replayToggle.textContent = 'Play';
+  const plan = Math.min(7, replay.plans - 1);
+  state.playhead = replay.planFrames[plan];
+  renderReplay(Math.floor(state.playhead));
+  showAllTargets.checked = true;
+  updateTargetVisibility();
+  renderer.render(scene, camera);
+  const visibleTargets = state.targetRigs.filter(rig => rig.group.visible).length;
+  const expectedFocus = new THREE.Vector3();
+  const animatedBounds = new THREE.Box3();
+  for (const marker of state.rig.jointMeshes) animatedBounds.expandByPoint(marker.position);
+  animatedBounds.getCenter(expectedFocus);
+  if (replay.frames !== state.meta.frames || replay.joints !== state.meta.joints ||
+      replay.plans !== state.meta.plans || replay.targetFrames !== 4 || visibleTargets !== 4 ||
+      focus.distanceTo(expectedFocus) > 1e-6 || !renderer.domElement.width) {
+    throw new Error('replay dimensions, targets, or animated-camera anchor are invalid');
+  }
+  document.documentElement.dataset.replayFrames = String(replay.frames);
+  document.documentElement.dataset.animatedJoints = String(replay.joints);
+  document.documentElement.dataset.replayPlans = String(replay.plans);
+  document.documentElement.dataset.targetFrames = String(replay.targetFrames);
+  document.documentElement.dataset.visibleTargets = String(visibleTargets);
+  document.documentElement.dataset.cameraSubject = 'animated';
+  document.documentElement.dataset.runtime = 'replay';
+  document.documentElement.dataset.testStatus = 'passed';
+  testResult.textContent = `Replay check passed: ${replay.frames} frames, ${replay.plans} plans, four target ghosts, animated-camera anchor`;
+}
+
+async function startReplay() {
+  state.replay = await loadReplay();
+  if (state.replay.fps !== state.meta.fps || state.replay.frames !== state.meta.frames ||
+      state.replay.joints !== state.meta.joints || state.replay.plans !== state.meta.plans) {
+    throw new Error('replay metadata does not match its payload');
+  }
+  const joints = Array.from({length: state.replay.joints}, (_, index) => ({
+    name: `joint-${index}`,
+    parent: state.replay.parents[index],
+    position: Array.from(state.replay.jointPositions.subarray(index * 3, index * 3 + 3)),
+  }));
+  makeSkeletons(joints);
+  setGroundPath(state.generatedPath, replayRootPath(state.replay.jointPositions, state.replay.frames, state.replay.joints), state.replay.frames);
+  document.querySelector('#live-style').hidden = true;
+  document.querySelector('.pad').hidden = true;
+  replayControls.hidden = false;
+  replayFrame.max = String(state.replay.frames - 1);
+  document.querySelector('#lede').textContent = 'Deterministic replay of the captured upstream session. Scrub or play without invoking either planner.';
+  document.querySelector('#camera-help').textContent = 'Drag to orbit · wheel to zoom · the camera follows only the animated skeleton';
+  document.querySelector('#backend').textContent = 'captured artifact';
+  statusElement.textContent = 'Replaying';
+  showAllTargets.checked = true;
+  renderReplay(0);
+  requestAnimationFrame(animate);
+  if (query.get('test') === '1') await replaySelfTest();
+  else document.documentElement.dataset.testStatus = 'ready';
+}
+
+async function comparisonSelfTest() {
+  if (!state.comparisonShowcase || state.comparisonShowcase.segments.length !== 3 ||
+      state.comparisonPlan !== -1 || Number(replayFrame.max) !== state.comparisonShowcase.frames - 1 ||
+      state.meta.passed !== true || state.comparison.passed !== true) {
+    throw new Error('comparison showcase is unavailable or is not the default');
+  }
+  const labels = state.comparisonShowcase.segments.map(segment => segment.label).join(',');
+  for (const segment of state.comparisonShowcase.segments) renderComparison(segment.start);
+  state.replayPlaying = false;
+  replayToggle.textContent = 'Play';
+  state.comparisonPlan = Math.min(7, state.comparison.plans.length - 1);
+  comparisonPlan.value = String(state.comparisonPlan);
+  comparisonPlan.dispatchEvent(new Event('change'));
+  state.playhead = Math.min(8, Number(replayFrame.max));
+  renderComparison(state.playhead);
+  renderer.render(scene, camera);
+  if (state.comparison.plans.length !== state.meta.plans || state.comparison.joints !== 34 ||
+      state.rig.jointMeshes.length !== 34 || state.nativeRig.jointMeshes.length !== 34 ||
+      state.errorLines.geometry.attributes.position.count !== 68 || !renderer.domElement.width) {
+    throw new Error('comparison plan, overlay rigs, or error vectors are invalid');
+  }
+  document.documentElement.dataset.runtime = 'comparison';
+  document.documentElement.dataset.comparisonPlans = String(state.comparison.plans.length);
+  document.documentElement.dataset.animatedJoints = String(state.comparison.joints);
+  document.documentElement.dataset.errorVectors = String(state.comparison.joints);
+  document.documentElement.dataset.comparisonShowcase = labels;
+  document.documentElement.dataset.comparisonShowcaseFrames = String(state.comparisonShowcase.frames);
+  document.documentElement.dataset.comparisonPassed = String(state.comparison.passed);
+  document.documentElement.dataset.testStatus = 'passed';
+  testResult.textContent = `Parity viewer check passed: ${state.comparison.plans.length} independent plans, upstream/native overlay, ${state.comparison.joints} error vectors`;
+}
+
+async function startComparison() {
+  state.comparison = await api('/api/comparison');
+  if (state.comparison.format !== 'motionbricks-open-loop-report-v1' ||
+      state.comparison.fps !== state.meta.fps || state.comparison.joints !== state.meta.joints ||
+      state.comparison.plans.length !== state.meta.plans || state.comparison.passed !== state.meta.passed) {
+    throw new Error('comparison metadata does not match its report');
+  }
+  document.documentElement.dataset.comparisonPassed = String(state.comparison.passed);
+  const joints = Array.from({length: state.comparison.joints}, (_, index) => ({
+    name: `joint-${index}`, parent: state.comparison.parents[index],
+    position: state.comparison.neutral_joints.slice(index * 3, index * 3 + 3),
+  }));
+  makeComparisonSkeletons(joints);
+  state.comparisonShowcase = buildComparisonShowcase(state.comparison);
+  if (!state.comparisonShowcase) throw new Error('comparison report does not contain the three-motion showcase');
+  const showcaseOption = document.createElement('option');
+  showcaseOption.value = '-1';
+  showcaseOption.textContent = 'Showcase · forward walk → right turn → zombie walk';
+  comparisonPlan.append(showcaseOption);
+  for (const plan of state.comparison.plans) {
+    const option = document.createElement('option');
+    option.value = String(plan.index);
+    option.textContent = `plan ${plan.index} · ${plan.style.replaceAll('_', ' ')} · ${plan.actual_frames}/${plan.expected_frames} frames`;
+    comparisonPlan.append(option);
+  }
+  document.querySelector('#live-style').hidden = true;
+  document.querySelector('.pad').hidden = true;
+  document.querySelector('.target-frame-control').hidden = true;
+  document.querySelector('.view-options label').hidden = true;
+  document.querySelector('.target-help').hidden = true;
+  replayControls.hidden = false;
+  comparisonPlanRow.hidden = false;
+  document.querySelector('label[for="replay-frame"]').childNodes[0].textContent = 'Comparison frame ';
+  document.querySelector('.legend span:first-child').lastChild.textContent = 'Upstream';
+  document.querySelector('.legend span:last-child').lastChild.textContent = 'Native';
+  document.querySelector('.target-swatch').style.background = '#65a9ff';
+  document.querySelector('.target-swatch').style.color = '#65a9ff';
+  const verdict = state.comparison.passed ? 'Strict parity passed.' : 'Strict parity failed.';
+  document.querySelector('#lede').textContent = `${verdict} Open-loop comparison of forward walking, a right turn, and zombie walking. Each replan starts from the same recorded upstream context.`;
+  document.querySelector('#camera-help').textContent = 'Drag to orbit · wheel to zoom · solid green is upstream, blue diamonds are native';
+  document.querySelector('#backend').textContent = `${state.comparison.device} parity report`;
+  comparisonPlan.value = '-1';
+  comparisonPlan.dispatchEvent(new Event('change'));
+  requestAnimationFrame(animate);
+  if (query.get('test') === '1') await comparisonSelfTest();
+  else document.documentElement.dataset.testStatus = 'ready';
+}
+
 async function start() {
   try {
     state.meta = await api('/api/meta');
+    if (state.meta.runtime === 'comparison') {
+      await startComparison();
+      return;
+    }
+    if (state.meta.runtime === 'replay') {
+      await startReplay();
+      return;
+    }
     installStyles(state.meta.styles);
     makeSkeletons(state.meta.joints);
     const initial = await api('/api/session', {style: state.style});

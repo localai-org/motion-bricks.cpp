@@ -159,6 +159,12 @@ def clone_cpu(value, torch):
     return torch.as_tensor(value).detach().to(device="cpu").contiguous().clone()
 
 
+def clone_device(value, torch):
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"neural trace expected a tensor, got {type(value).__name__}")
+    return value.detach().contiguous().clone()
+
+
 def make_demo_args(upstream: Path) -> argparse.Namespace:
     root = upstream / "motionbricks"
     return argparse.Namespace(
@@ -229,7 +235,15 @@ def preflight(upstream: Path) -> None:
     }, indent=2, sort_keys=True))
 
 
-def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: int) -> None:
+def capture(
+    upstream: Path,
+    output: Path,
+    requested_seed: int,
+    artifact_limit: int,
+    trace_targets: bool = False,
+    trace_neural_plan: int | None = None,
+    trace_neural_all: bool = False,
+) -> None:
     if os.environ.get("MOTIONBRICKS_REFERENCE_CONTAINER") != "1":
         raise RuntimeError("session capture must run in the pinned reference session container")
     if output.exists():
@@ -267,6 +281,116 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
     torch.manual_seed(run_seed)
     demo.full_agent.reset()
 
+    target_traces: list[dict[str, Any]] = []
+    neural_traces: dict[int, dict[str, Any]] = {}
+    trace_frame = -1
+    if trace_targets:
+        original_target_transform = demo.full_agent._generate_target_joint_transforms
+
+        def traced_target_transform(inputs):
+            result = original_target_transform(inputs)
+            target_traces.append({
+                "frame": trace_frame,
+                "spring_target_root_position": clone_cpu(inputs["target_root_position"], torch),
+                "spring_target_root_positions": clone_cpu(inputs["target_root_positions"], torch),
+                "spring_target_root_headings": clone_cpu(inputs["target_root_headings"], torch),
+                "spring_target_heading": clone_cpu(inputs["target_root_heading"], torch),
+                "spring_start_root_positions": clone_cpu(inputs["start_root_positions"], torch),
+                "spring_start_root_headings": clone_cpu(inputs["start_root_headings"], torch),
+                "canonical_first_frame_position": clone_cpu(inputs["first_frame_position"], torch),
+                "canonical_first_frame_heading_angle": clone_cpu(inputs["first_frame_heading_angle"], torch),
+                "target_global_joint_positions": clone_cpu(result[0], torch),
+                "target_global_joint_rotations": clone_cpu(result[1], torch),
+                "target_global_root_positions": clone_cpu(result[2], torch),
+            })
+            return result
+
+        # This is an instance-local external wrapper. The upstream checkout is
+        # mounted read-only and the returned/input tensors are copied only after
+        # the original boundary has completed.
+        demo.full_agent._generate_target_joint_transforms = traced_target_transform
+
+    trace_neural_enabled = trace_neural_plan is not None or trace_neural_all
+    if trace_neural_enabled:
+        if trace_neural_plan is not None and trace_neural_plan < 0:
+            raise ValueError("--trace-neural-plan must be non-negative")
+        inferencer = demo.full_agent._inferencer
+        trace_state: dict[str, Any] = {"call": 0, "active": False, "device": {}}
+
+        def save_device(name, value):
+            if trace_state["active"]:
+                trace_state["device"][name] = clone_device(value, torch)
+
+        def root_hook(_module, inputs, output):
+            names = (
+                "global_root_values", "has_global_root_values",
+                "local_root_values", "has_local_root_values",
+                "poses", "has_poses", "num_tokens",
+            )
+            for name, value in zip(names, inputs):
+                save_device(f"root.{name}", value)
+            for name in ("num_token_logits", "pred_num_tokens", "pred_global_root_values"):
+                save_device(f"root.{name}", output[name])
+
+        def pose_hook(_module, inputs, output):
+            names = ("input_tokens", "root_condition", "pose_condition", "has_pose_condition", "num_tokens")
+            for name, value in zip(names, inputs):
+                save_device(f"pose.{name}", value)
+            save_device("pose.logits", output["pose_logits"])
+
+        def decoder_pre_hook(_module, inputs, kwargs):
+            names = ("quantized", "external_condition", "target_condition", "has_target_condition")
+            for name, value in zip(names, inputs):
+                if value is not None:
+                    save_device(f"decoder.{name}", value)
+            if kwargs.get("token_mask") is not None:
+                save_device("decoder.token_mask", kwargs["token_mask"])
+
+        def decoder_hook(_module, _inputs, _kwargs, output):
+            save_device("decoder.output", output)
+
+        hook_handles = [
+            inferencer._root_model.backbone_net.register_forward_hook(root_hook),
+            inferencer._pose_model.backbone_net.register_forward_hook(pose_hook),
+            inferencer._vqvae_pose_model.decoder.register_forward_pre_hook(
+                decoder_pre_hook, with_kwargs=True
+            ),
+            inferencer._vqvae_pose_model.decoder.register_forward_hook(
+                decoder_hook, with_kwargs=True
+            ),
+        ]
+        original_predict = inferencer.predict
+
+        def traced_predict(*args, **kwargs):
+            plan_index = trace_state["call"]
+            trace_state["call"] += 1
+            trace_state["active"] = trace_neural_all or plan_index == trace_neural_plan
+            trace_state["device"] = {}
+            try:
+                result = original_predict(*args, **kwargs)
+                if trace_state["active"]:
+                    raw_names = (
+                        "input.global_root_values", "input.has_global_root_values",
+                        "input.local_root_values", "input.has_local_root_values",
+                        "input.local_poses", "input.has_local_poses", "input.num_tokens",
+                    )
+                    for name, value in zip(raw_names, args):
+                        save_device(name, value)
+                    if kwargs.get("allowed_pred_num_tokens") is not None:
+                        save_device("input.allowed_pred_num_tokens", kwargs["allowed_pred_num_tokens"])
+                    save_device("composition.pred_global_motions", result[0])
+                    save_device("composition.pred_num_tokens", result[1])
+                    neural_traces[plan_index] = {
+                        f"neural.{name}": clone_cpu(value, torch)
+                        for name, value in trace_state["device"].items()
+                    }
+                return result
+            finally:
+                trace_state["active"] = False
+                trace_state["device"] = {}
+
+        inferencer.predict = traced_predict
+
     controls: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     emitted_qpos = []
@@ -292,6 +416,8 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
     )
 
     for frame in range(FRAME_COUNT):
+        trace_frame = frame
+        traces_before = len(target_traces)
         scripted = scenario_control(frame)
         camera.cam.lookat[:] = scripted["camera"]["lookat"]
         camera.cam.distance = scripted["camera"]["distance"]
@@ -344,6 +470,15 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
             if pending_features is not None:
                 raise RuntimeError("a new plan arrived before the previous public feature result")
             plans[next_plan] = {"qpos": clone_cpu(generated[0], torch)}
+            if next_plan in neural_traces:
+                plans[next_plan].update(neural_traces.pop(next_plan))
+            if trace_targets:
+                if len(target_traces) != traces_before + 1:
+                    raise RuntimeError("replan did not expose exactly one target-transform boundary")
+                trace = target_traces[-1]
+                if trace.pop("frame") != frame:
+                    raise RuntimeError("target-transform trace was associated with the wrong frame")
+                plans[next_plan].update(trace)
             pending_features = next_plan
             events.append({
                 "type": "replan",
@@ -357,6 +492,8 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
                 "valid_length": valid_length,
             })
             next_plan += 1
+        elif len(target_traces) != traces_before:
+            raise RuntimeError("target-transform boundary ran without a public replan")
         elif pending_features is not None:
             # The no-replan public return is (model_features, qpos), whereas a
             # replan returns (qpos, valid_length). Capture it on the next frame.
@@ -380,6 +517,17 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
         raise RuntimeError("upstream session did not produce a planning event")
     if len(plans) != len(events) or sorted(plans) != list(range(len(events))):
         raise RuntimeError("planning artifacts do not form one contiguous record per replan event")
+    if trace_neural_enabled:
+        requested_neural_plans = set(plans) if trace_neural_all else {trace_neural_plan}
+        if not requested_neural_plans.issubset(plans):
+            raise RuntimeError("one or more requested neural trace plans were not generated")
+        if neural_traces:
+            raise RuntimeError("a neural trace was not attached to its planning artifact")
+        for plan_index in requested_neural_plans:
+            if not any(name.startswith("neural.") for name in plans[plan_index]):
+                raise RuntimeError(f"plan {plan_index} has no neural trace tensors")
+        for handle in hook_handles:
+            handle.remove()
     for event in events:
         valid_length = event["valid_length"]
         if valid_length < 24 or valid_length > 64 or valid_length % 4:
@@ -389,7 +537,7 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
         if token_index >= allowed.numel() or int(allowed[token_index].item()) != 1:
             raise RuntimeError(f"plan {event['plan']} selected a disallowed duration")
         tensors = plans[event["plan"]]
-        if set(tensors) != {"qpos", "model_features"}:
+        if not {"qpos", "model_features"}.issubset(tensors):
             raise RuntimeError(f"plan {event['plan']} is missing a public output tensor")
         if tensors["qpos"].ndim != 3 or tensors["qpos"].shape[:2] != (1, valid_length):
             raise RuntimeError(f"plan {event['plan']} has inconsistent qpos shape")
@@ -457,6 +605,16 @@ def capture(upstream: Path, output: Path, requested_seed: int, artifact_limit: i
             "random_speed_scale": False,
             "lookat_movement_direction": False,
         },
+        "trace": {
+            "target_boundaries": trace_targets,
+            "neural_plan": trace_neural_plan,
+            "neural_all": trace_neural_all,
+            "mechanism": {
+                "targets": "external_instance_post_return_wrapper" if trace_targets else "disabled",
+                "neural": "external_instance_wrappers_and_forward_hooks" if trace_neural_enabled else "disabled",
+            },
+            "upstream_source_modified": False,
+        },
         "environment": {
             "container_required": True,
             "container_base": os.environ.get("MOTIONBRICKS_SESSION_BASE_IMAGE", "unknown"),
@@ -504,6 +662,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--artifact-limit-mb", type=int, default=ARTIFACT_LIMIT_BYTES // (1024 * 1024))
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--trace-targets", action="store_true")
+    neural_group = parser.add_mutually_exclusive_group()
+    neural_group.add_argument("--trace-neural-plan", type=int)
+    neural_group.add_argument("--trace-neural-all", action="store_true")
     args = parser.parse_args()
     if args.preflight_only:
         preflight(args.upstream_root.resolve())
@@ -511,7 +673,8 @@ def main() -> None:
     if args.output is None:
         parser.error("--output is required unless --preflight-only is used")
     capture(args.upstream_root.resolve(), args.output.resolve(), args.seed,
-            args.artifact_limit_mb * 1024 * 1024)
+            args.artifact_limit_mb * 1024 * 1024, args.trace_targets,
+            args.trace_neural_plan, args.trace_neural_all)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	cdpinput "github.com/chromedp/cdproto/input"
 	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -106,6 +108,86 @@ func TestNativeHTTPFlow(t *testing.T) {
 	}
 }
 
+func TestReplayHTTPFlow(t *testing.T) {
+	path := os.Getenv("MOTIONBRICKS_REPLAY")
+	if path == "" {
+		t.Skip("portable replay is not configured")
+	}
+	replay, err := loadReplayServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(replay.routes())
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta replayMetadata
+	if err = json.NewDecoder(response.Body).Decode(&meta); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || meta.Runtime != "replay" || meta.Frames != 345 || meta.Joints != 30 || meta.Plans != 14 || meta.TargetFrames != 4 {
+		t.Fatalf("invalid replay metadata: status=%d meta=%+v", response.StatusCode, meta)
+	}
+	response, err = http.Get(server.URL + "/api/replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(served, original) {
+		t.Fatalf("served replay differs: status=%d served=%d original=%d", response.StatusCode, len(served), len(original))
+	}
+}
+
+func TestComparisonHTTPFlow(t *testing.T) {
+	path := os.Getenv("MOTIONBRICKS_COMPARISON")
+	if path == "" {
+		t.Skip("open-loop comparison is not configured")
+	}
+	comparison, err := loadComparisonServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(comparison.routes())
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err = json.NewDecoder(response.Body).Decode(&meta); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || meta["runtime"] != "comparison" || meta["plans"] != float64(14) ||
+		meta["joints"] != float64(34) || meta["passed"] != true {
+		t.Fatalf("invalid comparison metadata: status=%d meta=%v", response.StatusCode, meta)
+	}
+	response, err = http.Get(server.URL + "/api/comparison")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Equal(served, original) {
+		t.Fatalf("served comparison differs: status=%d err=%v", response.StatusCode, err)
+	}
+}
+
 func TestHeadlessChrome(t *testing.T) {
 	libraryPath, modelPath, stylesPath := os.Getenv("MOTIONBRICKS_LIB"), os.Getenv("MOTIONBRICKS_MODEL"), os.Getenv("MOTIONBRICKS_STYLES")
 	if libraryPath == "" || modelPath == "" || stylesPath == "" {
@@ -172,6 +254,10 @@ func TestHeadlessChrome(t *testing.T) {
 		})
 	}
 	var initialScreenshot, movingScreenshot, screenshot []byte
+	var viewportCenter struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	}
 	var message string
 	err = chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -184,12 +270,23 @@ func TestHeadlessChrome(t *testing.T) {
 		waitFor(`document.documentElement.dataset.testStatus === "ready"`, "initial plan"),
 		chromedp.FullScreenshot(&initialScreenshot, 90),
 		chromedp.Click(`.pad button[data-key="w"]`, chromedp.ByQuery),
-		waitFor(`Number(document.documentElement.dataset.planSequence) >= 2 && document.documentElement.dataset.plannedMoveZ === "1"`, "forward pad-button plan"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 2 && Math.abs(Number(document.documentElement.dataset.plannedMoveX) + Math.sin(Number(document.documentElement.dataset.cameraYaw))) < 1e-5 && Math.abs(Number(document.documentElement.dataset.plannedMoveZ) + Math.cos(Number(document.documentElement.dataset.cameraYaw))) < 1e-5`, "camera-forward pad-button plan"),
 		chromedp.FullScreenshot(&movingScreenshot, 90),
 		chromedp.Click(`.pad button[data-key="w"]`, chromedp.ByQuery),
 		waitFor(`Number(document.documentElement.dataset.planSequence) >= 3 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "pad-button stop plan"),
+		chromedp.Evaluate(`(() => { const bounds = document.querySelector('#viewport').getBoundingClientRect(); return {x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2}; })()`, &viewportCenter),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			if err := cdpinput.DispatchMouseEvent(cdpinput.MousePressed, viewportCenter.X, viewportCenter.Y).WithButton(cdpinput.Left).WithButtons(1).WithClickCount(1).Do(ctx); err != nil {
+				return err
+			}
+			if err := cdpinput.DispatchMouseEvent(cdpinput.MouseMoved, viewportCenter.X+120, viewportCenter.Y).WithButton(cdpinput.Left).WithButtons(1).Do(ctx); err != nil {
+				return err
+			}
+			return cdpinput.DispatchMouseEvent(cdpinput.MouseReleased, viewportCenter.X+120, viewportCenter.Y).WithButton(cdpinput.Left).Do(ctx)
+		}),
+		waitFor(`Math.abs(Number(document.documentElement.dataset.cameraYaw) - 0.68) > 0.5`, "camera orbit"),
 		chromedp.Evaluate(`dispatchEvent(new KeyboardEvent("keydown", {key:"d", bubbles:true}))`, nil),
-		waitFor(`Number(document.documentElement.dataset.planSequence) >= 4 && document.documentElement.dataset.plannedMoveX === "1"`, "keyboard-right plan"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 4 && Math.abs(Number(document.documentElement.dataset.plannedMoveX) - Math.cos(Number(document.documentElement.dataset.cameraYaw))) < 1e-5 && Math.abs(Number(document.documentElement.dataset.plannedMoveZ) + Math.sin(Number(document.documentElement.dataset.cameraYaw))) < 1e-5`, "camera-right keyboard plan after orbit"),
 		chromedp.Evaluate(`dispatchEvent(new KeyboardEvent("keyup", {key:"d", bubbles:true}))`, nil),
 		waitFor(`Number(document.documentElement.dataset.planSequence) >= 5 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "keyboard stop plan"),
 		chromedp.Navigate(server.URL+"/?test=1"),
@@ -233,4 +330,153 @@ func TestHeadlessChrome(t *testing.T) {
 		}
 	}
 	t.Logf("%s; screenshots: %s, %s, %s (final %s)", message, artifacts[0].path, artifacts[1].path, artifacts[2].path, fmt.Sprintf("%d bytes", len(screenshot)))
+}
+
+func TestHeadlessReplay(t *testing.T) {
+	path := os.Getenv("MOTIONBRICKS_REPLAY")
+	if path == "" {
+		t.Skip("portable replay is not configured")
+	}
+	chrome := os.Getenv("MOTIONBRICKS_CHROME")
+	if chrome == "" {
+		var err error
+		chrome, err = exec.LookPath("chromium")
+		if err != nil {
+			t.Skip("chromium is not installed")
+		}
+	}
+	replay, err := loadReplayServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(replay.routes())
+	defer server.Close()
+	options := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	options = append(options, chromedp.ExecPath(chrome), chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true), chromedp.Flag("use-angle", "swiftshader"),
+		chromedp.Flag("enable-unsafe-swiftshader", true), chromedp.WindowSize(1280, 800))
+	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
+	defer cancelAllocator()
+	browser, cancelBrowser := chromedp.NewContext(allocator)
+	defer cancelBrowser()
+	ctx, cancel := context.WithTimeout(browser, 30*time.Second)
+	defer cancel()
+	wait := chromedp.ActionFunc(func(ctx context.Context) error {
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			var status string
+			if evaluateErr := chromedp.Evaluate(`document.documentElement.dataset.testStatus`, &status).Do(ctx); evaluateErr != nil {
+				return evaluateErr
+			}
+			if status == "passed" {
+				return nil
+			}
+			if status == "failed" {
+				var message string
+				_ = chromedp.Text("#test-result", &message, chromedp.ByQuery).Do(ctx)
+				return fmt.Errorf("browser replay self-test failed: %s", message)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return errors.New("timeout waiting for browser replay self-test")
+	})
+	var screenshot []byte
+	if err = chromedp.Run(ctx, chromedp.Navigate(server.URL+"/?test=1"), wait, chromedp.FullScreenshot(&screenshot, 90)); err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]string
+	if err = chromedp.Run(ctx, chromedp.Evaluate(`({runtime:document.documentElement.dataset.runtime,frames:document.documentElement.dataset.replayFrames,joints:document.documentElement.dataset.animatedJoints,plans:document.documentElement.dataset.replayPlans,targets:document.documentElement.dataset.targetFrames,visible:document.documentElement.dataset.visibleTargets,camera:document.documentElement.dataset.cameraSubject})`, &values)); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"runtime": "replay", "frames": "345", "joints": "30", "plans": "14", "targets": "4", "visible": "4", "camera": "animated"}
+	for key, expected := range want {
+		if values[key] != expected {
+			t.Fatalf("browser replay %s=%q, want %q (all=%v)", key, values[key], expected, values)
+		}
+	}
+	if len(screenshot) < 10_000 {
+		t.Fatalf("replay screenshot is unexpectedly small: %d bytes", len(screenshot))
+	}
+	artifact := os.Getenv("MOTIONBRICKS_REPLAY_SCREENSHOT")
+	if artifact == "" {
+		artifact = filepath.Join(t.TempDir(), "motionbricks-replay.png")
+	}
+	if err = os.WriteFile(artifact, screenshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("replay screenshot: %s (%d bytes)", artifact, len(screenshot))
+}
+
+func TestHeadlessComparison(t *testing.T) {
+	path := os.Getenv("MOTIONBRICKS_COMPARISON")
+	if path == "" {
+		t.Skip("open-loop comparison is not configured")
+	}
+	chrome := os.Getenv("MOTIONBRICKS_CHROME")
+	if chrome == "" {
+		var err error
+		chrome, err = exec.LookPath("chromium")
+		if err != nil {
+			t.Skip("chromium is not installed")
+		}
+	}
+	comparison, err := loadComparisonServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(comparison.routes())
+	defer server.Close()
+	options := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	options = append(options, chromedp.ExecPath(chrome), chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true), chromedp.Flag("use-angle", "swiftshader"),
+		chromedp.Flag("enable-unsafe-swiftshader", true), chromedp.WindowSize(1280, 800))
+	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
+	defer cancelAllocator()
+	browser, cancelBrowser := chromedp.NewContext(allocator)
+	defer cancelBrowser()
+	ctx, cancel := context.WithTimeout(browser, 30*time.Second)
+	defer cancel()
+	wait := chromedp.ActionFunc(func(ctx context.Context) error {
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			var status string
+			if evaluateErr := chromedp.Evaluate(`document.documentElement.dataset.testStatus`, &status).Do(ctx); evaluateErr != nil {
+				return evaluateErr
+			}
+			if status == "passed" {
+				return nil
+			}
+			if status == "failed" {
+				return errors.New("browser comparison self-test failed")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return errors.New("timeout waiting for browser comparison self-test")
+	})
+	var screenshot []byte
+	if err = chromedp.Run(ctx, chromedp.Navigate(server.URL+"/?test=1"), wait, chromedp.FullScreenshot(&screenshot, 90)); err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]string
+	if err = chromedp.Run(ctx, chromedp.Evaluate(`({runtime:document.documentElement.dataset.runtime,passed:document.documentElement.dataset.comparisonPassed,plans:document.documentElement.dataset.comparisonPlans,joints:document.documentElement.dataset.animatedJoints,vectors:document.documentElement.dataset.errorVectors,showcase:document.documentElement.dataset.comparisonShowcase,showcaseFrames:document.documentElement.dataset.comparisonShowcaseFrames})`, &values)); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"runtime": "comparison", "passed": "true", "plans": "14", "joints": "34", "vectors": "34",
+		"showcase": "Forward walk,Right turn,Zombie walk", "showcaseFrames": "176"}
+	for key, expected := range want {
+		if values[key] != expected {
+			t.Fatalf("comparison %s=%q, want %q", key, values[key], expected)
+		}
+	}
+	if len(screenshot) < 10_000 {
+		t.Fatalf("comparison screenshot is unexpectedly small: %d", len(screenshot))
+	}
+	artifact := os.Getenv("MOTIONBRICKS_COMPARISON_SCREENSHOT")
+	if artifact == "" {
+		artifact = filepath.Join(t.TempDir(), "motionbricks-comparison.png")
+	}
+	if err = os.WriteFile(artifact, screenshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("comparison screenshot: %s (%d bytes)", artifact, len(screenshot))
 }

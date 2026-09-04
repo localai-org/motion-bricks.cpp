@@ -13,13 +13,25 @@
     <aside>
       <p class="eyebrow">MOTIONBRICKS / G1</p>
       <h1>Whole-body motion</h1>
-      <p class="lede">Move with WASD. The character faces its travel direction; arrow keys turn independently.</p>
+      <p class="lede" id="lede">Move with WASD. The character faces its travel direction; arrow keys turn independently.</p>
       <div class="legend" aria-label="Skeleton legend">
         <span><i class="animated-swatch"></i>Animated model</span>
         <span><i class="target-swatch"></i>Target keyframes</span>
       </div>
-      <label for="style-select">Upstream pose style</label>
-      <select id="style-select" aria-label="Motion style"></select>
+      <div id="live-style">
+        <label for="style-select">Upstream pose style</label>
+        <select id="style-select" aria-label="Motion style"></select>
+      </div>
+      <div id="replay-controls" hidden>
+        <label for="replay-frame">Captured frame <output id="replay-frame-label" for="replay-frame">0/0</output></label>
+        <label id="comparison-plan-row" for="comparison-plan" hidden>Comparison playback
+          <select id="comparison-plan" aria-label="Parity plan"></select>
+        </label>
+        <div class="replay-row">
+          <button id="replay-toggle" type="button">Pause</button>
+          <input id="replay-frame" type="range" min="0" max="0" step="1" value="0" aria-label="Captured replay frame">
+        </div>
+      </div>
       <div class="target-frame-control">
         <label for="target-frame">Inspect placed target <output id="target-frame-label" for="target-frame">T3</output></label>
         <input id="target-frame" type="range" min="0" max="3" step="1" value="3" aria-label="Target frame">
@@ -29,7 +41,7 @@
         <button id="reset-camera" type="button">Reset camera</button>
       </div>
       <p class="target-help">T0–T3 are consecutive 30 FPS constraints, so their exact positions are intentionally close.</p>
-      <p class="camera-help">Drag to orbit · wheel to zoom · tap a pad direction to move, tap it again to stop</p>
+      <p class="camera-help" id="camera-help">Drag to orbit · wheel to zoom · tap a pad direction to move, tap it again to stop</p>
       <div class="pad" aria-label="Directional controls">
         <button data-key="w" data-x="0" data-z="1" aria-label="Walk forward">W</button>
         <button data-key="a" data-x="-1" data-z="0" aria-label="Walk left">A</button>
@@ -40,7 +52,7 @@
         <div><dt>Status</dt><dd id="status">Loading model…</dd></div>
         <div><dt>Plan</dt><dd id="plan-info">—</dd></div>
         <div><dt>Targets</dt><dd id="target-info">—</dd></div>
-        <div><dt>Backend</dt><dd>native GGML</dd></div>
+        <div><dt>Backend</dt><dd id="backend">native GGML</dd></div>
       </dl>
       <p id="test-result" role="status"></p>
     </aside>

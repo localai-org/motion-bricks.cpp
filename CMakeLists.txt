@@ -13,6 +13,7 @@ include(GNUInstallDirs)
 option(MOTIONBRICKS_BUILD_TESTS "Build motion-bricks.cpp tests" ON)
 option(MOTIONBRICKS_ENABLE_GGML "Use the pinned GGML submodule when present" ON)
 option(MOTIONBRICKS_ENABLE_VULKAN "Enable the GGML Vulkan backend" ON)
+option(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS "Run hardware-dependent Vulkan parity tests" OFF)
 option(MOTIONBRICKS_ENABLE_FUZZERS "Build libFuzzer targets" OFF)
 option(MOTIONBRICKS_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(MOTIONBRICKS_DOWNLOAD_MODELS "Download and verify the published runtime model/style bundle" ON)
@@ -26,6 +27,19 @@ set(MOTIONBRICKS_REFERENCE_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/generated/g1-f32"
     "Downloaded or locally converted MotionBricks runtime bundle")
 set(MOTIONBRICKS_REFERENCE_STYLES "${CMAKE_CURRENT_SOURCE_DIR}/generated/styles" CACHE PATH
     "Downloaded or locally converted MotionBricks style bundle")
+set(MOTIONBRICKS_VULKAN_PARITY_DEVICE "0" CACHE STRING
+    "GGML Vulkan device index used by opt-in parity tests")
+set(MOTIONBRICKS_VULKAN_PARITY_HARDWARE "unspecified" CACHE STRING
+    "Hardware name recorded by opt-in Vulkan parity tests")
+set(MOTIONBRICKS_VULKAN_PARITY_DRIVER "unspecified" CACHE STRING
+    "Driver version recorded by opt-in Vulkan parity tests")
+if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS AND
+   (MOTIONBRICKS_VULKAN_PARITY_HARDWARE STREQUAL "unspecified" OR
+    MOTIONBRICKS_VULKAN_PARITY_DRIVER STREQUAL "unspecified"))
+    message(FATAL_ERROR
+        "Vulkan parity tests require explicit MOTIONBRICKS_VULKAN_PARITY_HARDWARE "
+        "and MOTIONBRICKS_VULKAN_PARITY_DRIVER tags")
+endif()
 
 if(MOTIONBRICKS_ENABLE_GGML AND MOTIONBRICKS_DOWNLOAD_MODELS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -124,9 +138,15 @@ if(MOTIONBRICKS_SANITIZE)
     endforeach()
 endif()
 
-add_executable(motionbricks-cli src/cli.cpp)
+add_executable(motionbricks-cli src/cli.cpp src/session_replay.cpp)
 target_link_libraries(motionbricks-cli PRIVATE motionbricks::motionbricks)
 set_target_properties(motionbricks-cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(motionbricks-parity src/parity_runner.cpp src/plan_parity.cpp)
+target_include_directories(motionbricks-parity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(motionbricks-parity PRIVATE motionbricks::motionbricks_static)
+set_target_properties(motionbricks-parity PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 include(CTest)
@@ -134,7 +154,7 @@ if(BUILD_TESTING AND MOTIONBRICKS_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-install(TARGETS motionbricks_shared motionbricks_static motionbricks-cli
+install(TARGETS motionbricks_shared motionbricks_static motionbricks-cli motionbricks-parity
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

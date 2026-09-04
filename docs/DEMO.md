@@ -37,8 +37,9 @@ Run it from the repository root:
   -device cpu
 ```
 
-Open `http://127.0.0.1:8080/`. Hold physical W/A/S/D keys to move, or tap an
-on-screen direction to latch it; tap the active pad direction again to stop.
+Open `http://127.0.0.1:8080/`. Hold physical W/A/S/D keys to move relative to
+the current camera yaw, or tap an on-screen direction to latch the same
+camera-relative control; tap the active pad direction again to stop.
 Space or Escape also stops movement. Left/right arrow keys rotate the facing
 direction without changing the current travel vector. The selector switches
 among all `.mbstyle` files found in the style directory, including the 15
@@ -84,6 +85,49 @@ the native API.
 Three.js r180 is vendored under `demo/web/vendor` so the demo has no runtime
 CDN dependency.
 
+## Captured-session replay
+
+The same application has a replay-only mode for direct comparison with the
+upstream MuJoCo MP4. It does not load `libmotionbricks`, GGUF weights, styles,
+or an agent:
+
+```sh
+./build/debug/bin/motionbricks-demo \
+  -listen 127.0.0.1:8080 \
+  -replay ./generated/session-replay/session.mbreplay
+```
+
+The browser parses the versioned binary directly, draws the animated physical
+G1 hierarchy in mint, and draws T0--T3 in distinct amber, orange, red, and
+magenta. Play/pause and frame scrubbing use the artifact's 30 FPS timeline.
+The plan/mode display and both root paths come from that same immutable file;
+the camera bounds are computed from the animated skeleton only.
+
+## Open-loop parity viewer
+
+The demo can instead open a JSON report produced by `motionbricks-parity`:
+
+```sh
+./build/debug/bin/motionbricks-demo \
+  -listen 127.0.0.1:8080 \
+  -comparison ./generated/open-loop-parity/cpu-report.json
+```
+
+This mode loads no model or native library. By default it plays a 176-frame
+showcase assembled from the accepted capture's forward-walk, right-turn, and
+zombie-walk replans. Each showcased slice stops where the next replan begins,
+so it does not replay overlapping predictions twice. Select any independently
+evaluated replan from the same menu to loop and scrub it in isolation. The
+solid mint rig is the upstream unblended plan;
+the blue diamond-jointed rig is native output. Red line segments connect each
+corresponding joint, while the panel reports per-frame maximum/RMS joint error,
+aggregate plan metrics, style, and exact/mismatched duration. Solid and dashed
+floor paths show upstream and native roots. The comparison is deliberately
+open loop: at each replan boundary the native branch starts again from the
+recorded upstream context, so an early error cannot contaminate later plans.
+The showcase is therefore a visual comparison playlist, not evidence of
+closed-loop native playback.
+
 ## Tests
 
 With the generated assets present, CTest registers `motionbricks-go-demo` when
@@ -93,8 +137,27 @@ Chromium to select `walk_zombie`, turn right, plan another chunk, render the
 34-joint generated hierarchy plus the target inspector, and capture initial,
 forward-motion, and style-and-turn screenshots. It uses real Chrome click and
 keyboard events and asserts forward-pad movement, pad stop, keyboard movement,
-keyboard stop, animated-skeleton camera anchoring, individual target selection,
+keyboard stop, camera-relative direction before and after a real viewport
+orbit, animated-skeleton camera anchoring, individual target selection,
 and the four-pose overlay before the visual self-test.
+
+When `generated/session-replay/session.mbreplay` exists at CMake configuration
+time, the suite also starts a replay-only server and asks headless Chromium to
+jump to a turning replan. It asserts 345 frames, 30 physical joints, 14
+plans, four visible target ghosts, byte-identical HTTP delivery, and an
+animated-only camera anchor, then captures a replay screenshot.
+
+Setting `MOTIONBRICKS_COMPARISON` adds HTTP validation and a headless Chromium
+test for the parity viewer. It selects a turning plan, scrubs it, verifies two
+34-joint rigs and 34 error vectors, requires a green report-level parity
+verdict, and captures a screenshot:
+
+```sh
+cd demo
+MOTIONBRICKS_COMPARISON=../generated/open-loop-parity/cpu-report.json \
+MOTIONBRICKS_COMPARISON_SCREENSHOT=../generated/open-loop-parity/threejs-comparison.png \
+MOTIONBRICKS_CHROME="$(command -v chromium)" CGO_ENABLED=0 go test -v ./...
+```
 
 The Go tests can also be run directly:
 

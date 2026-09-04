@@ -65,10 +65,16 @@ int main(int argc, char ** argv) {
     const auto mask_i32 = tensor_values<std::int32_t>(fixture_tensors.get(), "input.has_pose_cond");
     const auto duration = tensor_values<std::int32_t>(fixture_tensors.get(), "input.num_tokens");
     const auto expected = tensor_values<float>(fixture_tensors.get(), "output.pose_logits");
+    assert(tokens.size() % 8U == 0U);
+    const auto positions = static_cast<std::uint32_t>(tokens.size() / 8U);
+    assert(root.size() == static_cast<std::size_t>(positions) * 4U * 4U);
+    assert(condition.size() == static_cast<std::size_t>(positions) * 4U * 304U);
+    assert(mask_i32.size() == static_cast<std::size_t>(positions) * 4U);
     std::vector<std::uint8_t> mask(mask_i32.begin(), mask_i32.end());
     std::vector<float> actual;
     status = motionbricks::detail::run_pose_planner(
-        *model.runtime, tokens, root, condition, mask, 6, static_cast<std::uint32_t>(duration[0]),
+        *model.runtime, tokens, root, condition, mask, positions,
+        static_cast<std::uint32_t>(duration[0]),
         actual, reason);
     if (status != MB_OK) {
         std::cerr << reason << '\n';
@@ -78,12 +84,13 @@ int main(int argc, char ** argv) {
     float max_absolute = 0.0F;
     float max_relative = 0.0F;
     std::size_t token_mismatches = 0;
-    for (std::size_t index = 0; index < actual.size(); ++index) {
+    const auto compared = std::min(actual.size(), static_cast<std::size_t>(duration[0]) * 80U);
+    for (std::size_t index = 0; index < compared; ++index) {
         max_absolute = std::max(max_absolute, std::abs(actual[index] - expected[index]));
         max_relative = std::max(max_relative,
             std::abs(actual[index] - expected[index]) / std::max(1.0e-6F, std::abs(expected[index])));
     }
-    for (std::size_t head = 0; head < actual.size() / 10U; ++head) {
+    for (std::size_t head = 0; head < compared / 10U; ++head) {
         const auto actual_begin = actual.begin() + static_cast<std::ptrdiff_t>(head * 10U);
         const auto expected_begin = expected.begin() + static_cast<std::ptrdiff_t>(head * 10U);
         if (std::max_element(actual_begin, actual_begin + 10) - actual_begin !=

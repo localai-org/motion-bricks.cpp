@@ -62,7 +62,10 @@ def tensor_files(capture: Path, manifest: dict[str, Any]) -> list[str]:
 
 
 def compare_capture_set(
-    captures: list[Path], max_abs_tolerance: float, relative_l2_tolerance: float
+    captures: list[Path],
+    max_abs_tolerance: float,
+    relative_l2_tolerance: float,
+    core_only: bool = False,
 ) -> dict[str, Any]:
     if len(captures) < 2:
         raise ValueError("at least two capture directories are required")
@@ -81,8 +84,12 @@ def compare_capture_set(
 
     failures: list[str] = []
     reference_manifest = manifests[0]
+    core_exclusions = {("harness",), ("environment", "os_packages")}
+    contract_paths = tuple(
+        path for path in CONTRACT_PATHS if not core_only or path not in core_exclusions
+    )
     for index, manifest in enumerate(manifests[1:], start=1):
-        for path in CONTRACT_PATHS:
+        for path in contract_paths:
             if nested(reference_manifest, path) != nested(manifest, path):
                 failures.append(f"run {index} differs at manifest contract {'.'.join(path)}")
         for filename in ("controls.jsonl", "events.jsonl"):
@@ -100,7 +107,10 @@ def compare_capture_set(
         keys = list(opened[0])
         names_match = True
         for index, handle in enumerate(opened[1:], start=1):
-            if list(handle) != keys:
+            if core_only and not set(keys).issubset(handle):
+                failures.append(f"run {index} is missing reference tensors for {filename}")
+                names_match = False
+            elif not core_only and list(handle) != keys:
                 failures.append(f"run {index} differs in tensor names for {filename}")
                 names_match = False
         if not names_match:
@@ -155,6 +165,7 @@ def compare_capture_set(
 
     return {
         "format": COMPARISON_FORMAT,
+        "scope": "core_outputs" if core_only else "full_capture",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "captures": [path.name for path in captures],
         "capture_manifests": [
@@ -181,9 +192,15 @@ def main() -> None:
     parser.add_argument("--max-abs", type=float, default=1e-5)
     parser.add_argument("--max-relative-l2", type=float, default=1e-6)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--core-only",
+        action="store_true",
+        help="compare reference tensors while allowing additional trace tensors and harness identity",
+    )
     args = parser.parse_args()
     result = compare_capture_set(
-        [path.resolve() for path in args.captures], args.max_abs, args.max_relative_l2
+        [path.resolve() for path in args.captures], args.max_abs, args.max_relative_l2,
+        args.core_only,
     )
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:

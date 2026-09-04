@@ -134,12 +134,31 @@ branch.
 ## Interactive demo
 
 The initial Go/Three.js demo renders the model's 34-joint skeleton alongside
-the four actual placed target-keyframe ghosts. It lets you steer with W/A/S/D,
+the four actual placed target-keyframe ghosts. It lets you steer relative to
+the current camera yaw with W/A/S/D,
 turn facing with the arrow keys, orbit/zoom the camera, and switch among the
 converted upstream styles. It uses the reusable PureGo binding and the same
 stateful native agent as other applications. See the
 [demo guide](docs/DEMO.md) for build, run, architecture, and headless-Chromium
 test instructions.
+
+The observational-parity tools can also turn the accepted upstream session
+into one immutable `.mbreplay` file consumed by the C++ CLI and the Three.js
+replay-only mode, plus a 345-frame MuJoCo reference MP4. See the
+[reference guide](reference/README.md#target-trace-and-cross-runtime-visual-replay).
+
+The parity gate converts all 14 captured replans into an independent open-loop
+fixture, runs each through the real planner, writes aggregate, per-plan, and
+optional neural-boundary reports, and presents an upstream/native overlay with
+a joint-error scrubber. Strict CPU parity now passes all 14 plans against an
+upstream PyTorch CPU replay of the exact accepted sparse inputs. The original
+CUDA capture remains a separate cross-device diagnostic because near-tie pose
+argmax choices can differ across CPU and CUDA arithmetic. See
+[open-loop native parity](reference/README.md#open-loop-native-parity).
+
+The opt-in CPU/Vulkan gate also passes all 14 plans on the recorded NVIDIA RTX
+5070 Ti configuration. It uses exact durations and bounded public animation
+errors rather than requiring bit-identical floating-point intermediates.
 
 ## Design
 

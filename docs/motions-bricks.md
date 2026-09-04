@@ -4,8 +4,6 @@ Don't modify this unless instructed.
 
 # Questions to loop back to
 
-- camera controls, zoom pan etc
-- Set a new target for parity, exactly what components should we select for that?
 - where is the C API documentation
 - Are low-level functions exposed so things like styles can be handle externally? could someone just use it for inference?
 - camera relative WASD keys

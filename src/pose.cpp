@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,6 +49,7 @@ ggml_tensor * layer_norm(ggml_context * context, ggml_tensor * input,
 
 ggml_tensor * transformer_layer(ggml_context * context, const neural_runtime & runtime,
                                 ggml_tensor * input, unsigned layer, std::uint32_t positions,
+                                ggml_tensor * attention_mask,
                                 std::string & reason) {
     constexpr std::int64_t embedding = 1024;
     constexpr std::int64_t heads = 16;
@@ -78,9 +80,8 @@ ggml_tensor * transformer_layer(ggml_context * context, const neural_runtime & r
         ggml_cont_3d(context, query_values, head_width, heads, positions), 0, 2, 1, 3);
     auto * key = ggml_permute(context,
         ggml_cont_3d(context, key_values, head_width, heads, positions), 0, 2, 1, 3);
-    auto * scores = ggml_mul_mat(context, key, query);
-    scores = ggml_scale(context, scores, 1.0F / std::sqrt(static_cast<float>(head_width)));
-    scores = ggml_soft_max(context, scores);
+    auto * scores = ggml_soft_max_ext(context, ggml_mul_mat(context, key, query),
+        attention_mask, 1.0F / std::sqrt(static_cast<float>(head_width)), 0.0F);
     auto * value_transposed = ggml_cont_3d(context,
         ggml_permute(context,
             ggml_cont_3d(context, value_values, head_width, heads, positions), 1, 2, 0, 3),
@@ -146,11 +147,14 @@ mb_status run_pose_planner(const neural_runtime & runtime,
     auto * condition_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, pose_width, frames);
     auto * mask_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1, frames);
     auto * duration_input = ggml_new_tensor_1d(context.get(), GGML_TYPE_I32, 1);
+    auto * attention_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32,
+                                               positions, positions);
     ggml_set_input(token_input);
     ggml_set_input(root_input);
     ggml_set_input(condition_input);
     ggml_set_input(mask_input);
     ggml_set_input(duration_input);
+    ggml_set_input(attention_mask);
 
     auto * token_embedding_weight = weight(runtime, "_pose_token_emb.weight", reason);
     auto * token_embedding = ggml_get_rows(context.get(), token_embedding_weight, token_input);
@@ -194,7 +198,8 @@ mb_status run_pose_planner(const neural_runtime & runtime,
     hidden = ggml_add(context.get(), hidden, position_view);
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
     for (unsigned layer = 0; layer < 16U; ++layer) {
-        hidden = transformer_layer(context.get(), runtime, hidden, layer, positions, reason);
+        hidden = transformer_layer(context.get(), runtime, hidden, layer, positions,
+                                   attention_mask, reason);
         if (hidden == nullptr) return MB_INCOMPATIBLE_MODEL;
     }
     auto * output = linear(context.get(), hidden,
@@ -215,12 +220,19 @@ mb_status run_pose_planner(const neural_runtime & runtime,
             offset_tokens[static_cast<std::size_t>(position) * pose_heads + head] +=
                 static_cast<std::int32_t>(head * 11U);
     std::vector<float> mask(has_pose_condition.begin(), has_pose_condition.end());
+    std::vector<float> padding_mask(static_cast<std::size_t>(positions) * positions);
+    for (std::uint32_t query = 0; query < positions; ++query)
+        for (std::uint32_t key = num_tokens; key < positions; ++key)
+            padding_mask[static_cast<std::size_t>(query) * positions + key] =
+                -std::numeric_limits<float>::infinity();
     const std::int32_t duration_index = static_cast<std::int32_t>(num_tokens - 6U);
     ggml_backend_tensor_set(token_input, offset_tokens.data(), 0, ggml_nbytes(token_input));
     ggml_backend_tensor_set(root_input, local_root_values.data(), 0, ggml_nbytes(root_input));
     ggml_backend_tensor_set(condition_input, pose_condition.data(), 0, ggml_nbytes(condition_input));
     ggml_backend_tensor_set(mask_input, mask.data(), 0, ggml_nbytes(mask_input));
     ggml_backend_tensor_set(duration_input, &duration_index, 0, sizeof(duration_index));
+    ggml_backend_tensor_set(attention_mask, padding_mask.data(), 0,
+                            ggml_nbytes(attention_mask));
     const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("pose graph failed: ") + ggml_status_to_string(status);

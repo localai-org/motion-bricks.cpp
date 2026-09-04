@@ -19,6 +19,7 @@
               pkg-config
               git
               git-lfs
+              ffmpeg-headless
               go
               python3
               python3Packages.huggingface-hub

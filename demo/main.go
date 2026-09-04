@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -51,6 +53,49 @@ type demoServer struct {
 	static   http.Handler
 }
 
+type replayMetadata struct {
+	Runtime      string `json:"runtime"`
+	Format       string `json:"format"`
+	FPS          uint32 `json:"fps"`
+	Frames       uint32 `json:"frames"`
+	Joints       uint32 `json:"joints"`
+	QPos         uint32 `json:"qpos"`
+	Plans        uint32 `json:"plans"`
+	TargetFrames uint32 `json:"targetFrames"`
+}
+
+type replayServer struct {
+	data   []byte
+	meta   replayMetadata
+	static http.Handler
+}
+
+type comparisonPlan struct {
+	ExpectedFrames               uint32     `json:"expected_frames"`
+	ActualFrames                 uint32     `json:"actual_frames"`
+	Movement                     [3]float32 `json:"movement"`
+	Facing                       [3]float32 `json:"facing"`
+	ExpectedJointPositions       []float32  `json:"expected_joint_positions"`
+	NativeJointPositions         []float32  `json:"native_joint_positions"`
+	ExpectedTargetJointPositions []float32  `json:"expected_target_joint_positions"`
+	NativeTargetJointPositions   []float32  `json:"native_target_joint_positions"`
+}
+type comparisonDocument struct {
+	Format  string           `json:"format"`
+	Device  string           `json:"device"`
+	FPS     uint32           `json:"fps"`
+	Joints  uint32           `json:"joints"`
+	Passed  bool             `json:"passed"`
+	Parents []int32          `json:"parents"`
+	Neutral []float32        `json:"neutral_joints"`
+	Plans   []comparisonPlan `json:"plans"`
+}
+type comparisonServer struct {
+	data   []byte
+	meta   map[string]any
+	static http.Handler
+}
+
 type sessionRequest struct {
 	Style string `json:"style"`
 }
@@ -81,6 +126,14 @@ func parseDevice(value string) (mb.Device, error) {
 	default:
 		return 0, fmt.Errorf("unknown device %q", value)
 	}
+}
+
+func webHandler() (http.Handler, error) {
+	root, err := fs.Sub(webFiles, "web")
+	if err != nil {
+		return nil, err
+	}
+	return http.FileServer(http.FS(root)), nil
 }
 
 func loadDemoServer(libraryPath, modelPath, styleDirectory string, device mb.Device) (*demoServer, error) {
@@ -121,13 +174,108 @@ func loadDemoServer(libraryPath, modelPath, styleDirectory string, device mb.Dev
 		server.Close()
 		return nil, err
 	}
-	root, err := fs.Sub(webFiles, "web")
+	static, err := webHandler()
 	if err != nil {
 		server.Close()
 		return nil, err
 	}
-	server.static = http.FileServer(http.FS(root))
+	server.static = static
 	return server, nil
+}
+
+func loadReplayServer(path string) (*replayServer, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect replay: %w", err)
+	}
+	if info.Size() < 40 || info.Size() > 512<<20 {
+		return nil, fmt.Errorf("replay size %d is outside supported bounds", info.Size())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read replay: %w", err)
+	}
+	if !bytes.Equal(data[:8], []byte{'M', 'B', 'R', 'P', 'L', 'Y', '1', 0}) {
+		return nil, errors.New("unsupported replay magic")
+	}
+	value := func(index int) uint32 { return binary.LittleEndian.Uint32(data[index : index+4]) }
+	if value(8) != 1 || value(36) != 0 {
+		return nil, errors.New("unsupported replay header")
+	}
+	meta := replayMetadata{
+		Runtime: "replay", Format: "motionbricks-portable-replay-v1", FPS: value(12),
+		Frames: value(16), Joints: value(20), QPos: value(24), Plans: value(28), TargetFrames: value(32),
+	}
+	if meta.FPS == 0 || meta.FPS > 1000 || meta.Frames == 0 || meta.Frames > 1_000_000 ||
+		meta.Joints == 0 || meta.Joints > 64 || meta.QPos == 0 || meta.QPos > 256 ||
+		meta.Plans == 0 || meta.Plans > meta.Frames || meta.TargetFrames != 4 {
+		return nil, errors.New("replay header dimensions are outside supported bounds")
+	}
+	words := uint64(meta.Joints) + uint64(meta.Frames)*2 + uint64(meta.Frames)*uint64(meta.QPos) +
+		uint64(meta.Frames)*uint64(meta.Joints)*3 + uint64(meta.Plans)*3 +
+		uint64(meta.Plans)*uint64(meta.TargetFrames)*uint64(meta.Joints)*3
+	if words > (512<<20-40)/4 || uint64(len(data)) != 40+words*4 {
+		return nil, errors.New("replay payload size does not match its header")
+	}
+	static, err := webHandler()
+	if err != nil {
+		return nil, err
+	}
+	return &replayServer{data: data, meta: meta, static: static}, nil
+}
+
+func loadComparisonServer(path string) (*comparisonServer, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect comparison: %w", err)
+	}
+	if info.Size() < 64 || info.Size() > 512<<20 {
+		return nil, fmt.Errorf("comparison size %d is outside supported bounds", info.Size())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read comparison: %w", err)
+	}
+	var document comparisonDocument
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err = decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("decode comparison: %w", err)
+	}
+	if document.Format != "motionbricks-open-loop-report-v1" || document.FPS == 0 ||
+		document.FPS > 1000 || document.Joints == 0 || document.Joints > 64 ||
+		len(document.Plans) == 0 || len(document.Plans) > 10000 ||
+		len(document.Parents) != int(document.Joints) || len(document.Neutral) != int(document.Joints*3) {
+		return nil, errors.New("comparison metadata is unsupported")
+	}
+	if document.Parents[0] != -1 {
+		return nil, errors.New("comparison root parent must be -1")
+	}
+	for joint := 1; joint < int(document.Joints); joint++ {
+		if document.Parents[joint] < 0 || document.Parents[joint] >= int32(joint) {
+			return nil, errors.New("comparison joint topology is invalid")
+		}
+	}
+	for index, plan := range document.Plans {
+		if plan.ExpectedFrames < 24 || plan.ExpectedFrames > 64 || plan.ActualFrames < 24 || plan.ActualFrames > 64 ||
+			len(plan.ExpectedJointPositions) != int(plan.ExpectedFrames*document.Joints*3) ||
+			len(plan.NativeJointPositions) != int(plan.ActualFrames*document.Joints*3) ||
+			len(plan.ExpectedTargetJointPositions) != int(4*document.Joints*3) ||
+			len(plan.NativeTargetJointPositions) != int(4*document.Joints*3) {
+			return nil, fmt.Errorf("comparison plan %d dimensions are invalid", index)
+		}
+		for _, direction := range append(plan.Movement[:], plan.Facing[:]...) {
+			if math.IsNaN(float64(direction)) || math.IsInf(float64(direction), 0) {
+				return nil, fmt.Errorf("comparison plan %d command is not finite", index)
+			}
+		}
+	}
+	static, err := webHandler()
+	if err != nil {
+		return nil, err
+	}
+	meta := map[string]any{"runtime": "comparison", "format": document.Format, "fps": document.FPS,
+		"joints": document.Joints, "plans": len(document.Plans), "device": document.Device, "passed": document.Passed}
+	return &comparisonServer{data: data, meta: meta, static: static}, nil
 }
 
 func (s *demoServer) Close() {
@@ -255,6 +403,38 @@ func (s *demoServer) routes() http.Handler {
 	return securityHeaders(mux)
 }
 
+func (s *replayServer) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "runtime": "replay"})
+	})
+	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, _ *http.Request) {
+		jsonResponse(w, http.StatusOK, s.meta)
+	})
+	mux.HandleFunc("GET /api/replay", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, "session.mbreplay", time.Time{}, bytes.NewReader(s.data))
+	})
+	mux.Handle("/", s.static)
+	return securityHeaders(mux)
+}
+
+func (s *comparisonServer) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "runtime": "comparison"})
+	})
+	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, _ *http.Request) {
+		jsonResponse(w, http.StatusOK, s.meta)
+	})
+	mux.HandleFunc("GET /api/comparison", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		http.ServeContent(w, r, "open-loop-report.json", time.Time{}, bytes.NewReader(s.data))
+	})
+	mux.Handle("/", s.static)
+	return securityHeaders(mux)
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -346,26 +526,48 @@ func main() {
 	libraryPath := flag.String("library", os.Getenv("MOTIONBRICKS_LIB"), "path to libmotionbricks")
 	modelPath := flag.String("model", os.Getenv("MOTIONBRICKS_MODEL"), "model bundle directory")
 	stylesPath := flag.String("styles", os.Getenv("MOTIONBRICKS_STYLES"), "style directory")
+	replayPath := flag.String("replay", os.Getenv("MOTIONBRICKS_REPLAY"), "portable .mbreplay session (disables native planning)")
+	comparisonPath := flag.String("comparison", os.Getenv("MOTIONBRICKS_COMPARISON"), "open-loop parity report JSON (disables native planning)")
 	deviceName := flag.String("device", "cpu", "auto, cpu, or vulkan")
 	flag.Parse()
-	if *libraryPath == "" || *modelPath == "" || *stylesPath == "" {
-		log.Fatal("-library, -model, and -styles are required")
+	var handler http.Handler
+	closeDemo := func() {}
+	if *replayPath != "" && *comparisonPath != "" {
+		log.Fatal("-replay and -comparison are mutually exclusive")
+	} else if *comparisonPath != "" {
+		comparison, err := loadComparisonServer(*comparisonPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		handler = comparison.routes()
+	} else if *replayPath != "" {
+		replay, err := loadReplayServer(*replayPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		handler = replay.routes()
+	} else {
+		if *libraryPath == "" || *modelPath == "" || *stylesPath == "" {
+			log.Fatal("-library, -model, and -styles are required unless -replay or -comparison is provided")
+		}
+		device, err := parseDevice(*deviceName)
+		if err != nil {
+			log.Fatal(err)
+		}
+		demo, err := loadDemoServer(*libraryPath, *modelPath, *stylesPath, device)
+		if err != nil {
+			log.Fatal(err)
+		}
+		handler = demo.routes()
+		closeDemo = demo.Close
 	}
-	device, err := parseDevice(*deviceName)
-	if err != nil {
-		log.Fatal(err)
-	}
-	demo, err := loadDemoServer(*libraryPath, *modelPath, *stylesPath, device)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer demo.Close()
-	server := &http.Server{Addr: *listen, Handler: demo.routes(), ReadHeaderTimeout: 5 * time.Second}
+	defer closeDemo()
+	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	stopped := make(chan os.Signal, 1)
 	signal.Notify(stopped, os.Interrupt, syscall.SIGTERM)
 	go func() { <-stopped; _ = server.Close() }()
 	log.Printf("MotionBricks demo: http://%s", *listen)
-	if err = server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }

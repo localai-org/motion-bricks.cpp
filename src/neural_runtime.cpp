@@ -219,6 +219,12 @@ mb_status create_neural_runtime(const std::filesystem::path &, mb_device, std::u
     return MB_BACKEND_UNAVAILABLE;
 }
 
+bool neural_copy_f32(const neural_runtime &, std::string_view, std::string_view,
+                     std::vector<float> &, std::string & reason) {
+    reason = "this build has no GGML support";
+    return false;
+}
+
 #endif
 
 } // namespace motionbricks::detail

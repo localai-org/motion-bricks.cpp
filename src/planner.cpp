@@ -26,10 +26,15 @@ mb_status run_transition(const mb_model & model,
                          const transition_constraints & constraints,
                          mb_motion & output,
                          std::uint32_t * selected_tokens,
+                         transition_trace * trace,
                          std::string & reason) {
     if (!model.runtime || model.motion_mean.size() != 418U || model.motion_std.size() != 418U) {
         reason = "model is missing neural or normalization data";
         return MB_INCOMPATIBLE_MODEL;
+    }
+    if (trace != nullptr) {
+        *trace = {};
+        trace->constraints = constraints;
     }
     const float initial_x = constraints.global_root[0];
     const float initial_z = constraints.global_root[2];
@@ -55,6 +60,11 @@ mb_status run_transition(const mb_model & model,
             poses[frame * internal_pose_width + 1U + feature] = normalize_feature(
                 model, constraints.poses[frame * external_pose_width + feature], 9U + feature);
     }
+    if (trace != nullptr) {
+        trace->normalized_global_root = global;
+        trace->normalized_local_root = local;
+        trace->normalized_poses = poses;
+    }
 
     root_result root;
     auto status = run_root_planner_auto_probe(*model.runtime, global, constraints.has_global_root,
@@ -78,6 +88,11 @@ mb_status run_transition(const mb_model & model,
         if (status != MB_OK) return status;
     }
     const std::uint32_t frames = tokens * 4U;
+    if (trace != nullptr) {
+        trace->duration_logits = root.duration_logits;
+        trace->selected_tokens = tokens;
+        trace->predicted_global_root = root.global_root_values;
+    }
 
     std::vector<float> predicted_local(static_cast<std::size_t>(frames) * local_root_width);
     std::vector<float> raw_global(static_cast<std::size_t>(frames) * global_root_width);
@@ -107,6 +122,7 @@ mb_status run_transition(const mb_model & model,
     if (constraints.has_local_root[7] != 0U)
         std::copy_n(local.data() + 7U * local_root_width, local_root_width,
                     predicted_local.data() + (frames - 1U) * local_root_width);
+    if (trace != nullptr) trace->predicted_local_root = predicted_local;
 
     std::vector<float> pose_condition(static_cast<std::size_t>(frames) * internal_pose_width, 0.0F);
     std::vector<std::uint8_t> has_pose_condition(frames, 0U);
@@ -123,6 +139,11 @@ mb_status run_transition(const mb_model & model,
         destination[0] = source[0]; destination[1] = source[2];
         destination[2] = source[3]; destination[3] = source[4];
     }
+    if (trace != nullptr) {
+        trace->pose_root_condition = pose_root;
+        trace->pose_condition = pose_condition;
+        trace->has_pose_condition = has_pose_condition;
+    }
     std::vector<std::int32_t> pose_tokens(static_cast<std::size_t>(tokens) * 8U, 10);
     std::vector<float> logits;
     status = run_pose_planner(*model.runtime, pose_tokens, pose_root, pose_condition,
@@ -131,6 +152,10 @@ mb_status run_transition(const mb_model & model,
     for (std::size_t item = 0; item < pose_tokens.size(); ++item) {
         const auto begin = logits.begin() + static_cast<std::ptrdiff_t>(item * 10U);
         pose_tokens[item] = static_cast<std::int32_t>(std::max_element(begin, begin + 10) - begin);
+    }
+    if (trace != nullptr) {
+        trace->pose_logits = logits;
+        trace->pose_tokens = pose_tokens;
     }
 
     std::vector<float> codebook;
@@ -144,22 +169,29 @@ mb_status run_transition(const mb_model & model,
     for (std::uint32_t position = 0; position < tokens; ++position)
         for (std::uint32_t head = 0; head < 8U; ++head)
             for (std::uint32_t dimension = 0; dimension < 32U; ++dimension)
-                quantized[(head * 32U + dimension) * tokens + position] =
+                    quantized[(head * 32U + dimension) * tokens + position] =
                     codebook[(head * 10U + static_cast<std::uint32_t>(
                         pose_tokens[position * 8U + head])) * 32U + dimension];
+    if (trace != nullptr) trace->decoder_quantized = quantized;
 
     std::vector<float> external(static_cast<std::size_t>(frames) * 2U);
     for (std::uint32_t frame = 0; frame < frames; ++frame) {
         external[frame * 2U] = predicted_local[frame * local_root_width + 1U];
         external[frame * 2U + 1U] = predicted_local[frame * local_root_width + 2U];
     }
-    std::vector<std::uint8_t> decoder_mask(frames, 0U);
-    for (std::uint32_t frame = 0; frame < 4U; ++frame)
-        decoder_mask[frame] = has_pose_condition[frame];
+    if (trace != nullptr) trace->decoder_external_condition = external;
+    // Upstream reuses pred_has_pose_cond for the decoder, including both the
+    // four-frame source constraint and the dynamically placed four-frame end
+    // constraint. Dropping the latter changes the entire decoded pose even
+    // when root duration and pose-token selection agree.
+    std::vector<std::uint8_t> decoder_mask(has_pose_condition.begin(),
+                                           has_pose_condition.end());
+    if (trace != nullptr) trace->decoder_target_mask = decoder_mask;
     std::vector<float> decoded;
     status = run_vq_decoder(*model.runtime, quantized, external, pose_condition,
                             decoder_mask, tokens, decoded, reason);
     if (status != MB_OK) return status;
+    if (trace != nullptr) trace->decoder_output = decoded;
     status = decode_motion(model, decoded, frames, initial_x, initial_z,
                            initial_heading, output, reason);
     if (status == MB_OK && selected_tokens != nullptr) *selected_tokens = tokens;
