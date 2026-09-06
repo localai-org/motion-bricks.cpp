@@ -349,6 +349,40 @@ discrete argmax ties. `replay_pose_trace.py` reproduces and records this fact.
 Accordingly, the CUDA boundary comparison is diagnostic and may remain red;
 it is not used to weaken or redefine strict CPU parity.
 
+### Context-blend parity
+
+Upstream retains the unfiltered qpos whenever its default `FILTER_QPOS` path
+runs. Capture that observational buffer and build a compact blend-only fixture:
+
+```sh
+docker run --rm --device=nvidia.com/gpu=all \
+  --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/capture_session.py \
+  --upstream-root /upstream --output /work/generated/session-blend \
+  --seed 1234 --artifact-limit-mb 40 --trace-targets --trace-blend
+
+docker run --rm --user "$(id -u):$(id -g)" --entrypoint python \
+  -e PYTHONPATH=/work/reference \
+  -v "$PWD:/work" -v /path/to/GR00T-WholeBodyControl:/upstream:ro \
+  motionbricks-reference-session:torch2.7 \
+  /work/reference/build_blend_parity.py \
+  --capture /work/generated/session-blend --upstream-root /upstream \
+  --support /work/generated/safe/support.safetensors \
+  --output /work/generated/context-blend.mbblend
+
+./build/debug/tests/motionbricks-agent-blend-test generated/context-blend.mbblend
+```
+
+The builder first proves the recorded qpos exactly equals upstream's formula.
+The native test then applies the C++ filter to the same 14 unfiltered buffers.
+The measured root maximum is exactly zero; the worst physical-joint quaternion
+component error is 4.33e-7 (0.000050 degrees). Root orientation and the four
+virtual hand/toe endpoints are excluded because upstream's qpos filter cannot
+modify them. All generated observation artifacts remain gitignored.
+
 ### CPU/Vulkan parity
 
 Vulkan is compared to the strict CPU runtime rather than directly to the CUDA

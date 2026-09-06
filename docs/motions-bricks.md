@@ -6,7 +6,9 @@ Don't modify this unless instructed.
 
 - where is the C API documentation
 - Are low-level functions exposed so things like styles can be handle externally? could someone just use it for inference?
-- camera relative WASD keys
+- the camera jerks or shakes when we reach a corner or a transition
+- What is the difference between our context and upstreams?
+- Gumbel sampling
 
 # End goal
 
@@ -22,7 +24,7 @@ The demo server should be written in Go and use purego (or similar). The fronten
 
 # Bonus Goal
 
-Use motion-bricks.cpp with a physically simulated robot in MuJoco or a web browser simulator.
+Use motion-bricks.cpp with a physically simulated robot in the C++ backend using the Mujoco headless C API and GEAR-SONIC and render the results in the browser.
 
 # Process
 

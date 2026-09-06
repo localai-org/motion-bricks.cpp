@@ -29,7 +29,9 @@ struct encoded_frames {
 
 /* Converts public root positions and local XYZW rotations into the exact raw
    sparse features used by the released demo. The last four input frames are
-   used when a longer history is supplied. */
+   used when a longer history is supplied. Input is already in the canonical
+   model frame. Virtual hand/toe endpoints retain FK positions but use global
+   identity orientation features, matching upstream's dummy-joint scheme. */
 mb_status encode_context(const mb_model & model,
                          std::span<const float> root_xyz,
                          std::span<const float> local_rotation_xyzw,

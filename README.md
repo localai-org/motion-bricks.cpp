@@ -166,6 +166,7 @@ errors rather than requiring bit-identical floating-point intermediates.
 - [Implementation sketch and plan](docs/IMPLEMENTATION.md)
 - [Versioned formats](docs/FORMATS.md)
 - [Go/Three.js demo](docs/DEMO.md)
+- [Observational motion QA](docs/MOTION_QA.md)
 - [Pinned upstream reference](reference/README.md)
 
 ## License

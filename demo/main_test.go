@@ -45,6 +45,11 @@ func TestNativeHTTPFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer demo.Close()
+	if directory := os.Getenv("MOTIONBRICKS_KIMODO_DIR"); directory != "" {
+		if err = demo.loadKimodo(directory); err != nil {
+			t.Fatal(err)
+		}
+	}
 	server := httptest.NewServer(demo.routes())
 	defer server.Close()
 	response, err := http.Get(server.URL + "/api/meta")
@@ -52,9 +57,10 @@ func TestNativeHTTPFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var metadata struct {
-		FPS    int         `json:"fps"`
-		Joints []mb.Joint  `json:"joints"`
-		Styles []styleInfo `json:"styles"`
+		FPS         int              `json:"fps"`
+		Joints      []mb.Joint       `json:"joints"`
+		Styles      []styleInfo      `json:"styles"`
+		KimodoClips []kimodoClipInfo `json:"kimodo_clips"`
 	}
 	if err = json.NewDecoder(response.Body).Decode(&metadata); err != nil {
 		t.Fatal(err)
@@ -105,6 +111,31 @@ func TestNativeHTTPFlow(t *testing.T) {
 	if turned.Style != turnedStyle || turned.Motion == nil || turned.Motion.Joints != 34 || len(turned.Motion.Rotations) != int(turned.Motion.Frames*34*4) ||
 		turned.Targets == nil || turned.Targets.Frames != 4 || len(turned.Targets.Rotations) != 4*34*4 {
 		t.Fatalf("invalid turned response: style=%q motion=%+v", turned.Style, turned.Motion)
+	}
+	if len(metadata.KimodoClips) > 0 {
+		frame := 3
+		var authored kimodoStartResponse
+		post("/api/kimodo/start", kimodoStartRequest{Session: initial.Session, Clip: metadata.KimodoClips[0].ID, Advance: uint32(frame),
+			CurrentRoot:      [3]float32{turned.Motion.Roots[frame*3], turned.Motion.Roots[frame*3+1], turned.Motion.Roots[frame*3+2]},
+			CurrentRotations: append([]float32(nil), turned.Motion.Rotations[frame*34*4:(frame+1)*34*4]...)}, &authored)
+		if authored.EntryFrames != kimodoEntryFrames || authored.Clip.ID != metadata.KimodoClips[0].ID || authored.Motion == nil ||
+			authored.Motion.Frames != authored.Clip.Frames+kimodoEntryFrames || authored.Motion.Joints != 34 {
+			t.Fatalf("invalid Kimodo start response: %+v", authored)
+		}
+		body, _ := json.Marshal(planRequest{Session: initial.Session, Style: "walk", Facing: [2]float32{0, 1}})
+		blocked, postErr := http.Post(server.URL+"/api/plan", "application/json", bytes.NewReader(body))
+		if postErr != nil {
+			t.Fatal(postErr)
+		}
+		blocked.Body.Close()
+		if blocked.StatusCode != http.StatusConflict {
+			t.Fatalf("planning during Kimodo playback returned %d, want 409", blocked.StatusCode)
+		}
+		var resumed planResponse
+		post("/api/kimodo/finish", kimodoFinishRequest{Session: initial.Session, Style: "walk", Facing: [2]float32{0, 1}, Seed: 91}, &resumed)
+		if resumed.Motion == nil || resumed.Motion.Frames < 24 || resumed.Motion.Joints != 34 || resumed.Targets == nil || resumed.Targets.Frames != 4 {
+			t.Fatalf("invalid MotionBricks resume response: %+v", resumed)
+		}
 	}
 }
 
@@ -206,6 +237,11 @@ func TestHeadlessChrome(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer demo.Close()
+	if directory := os.Getenv("MOTIONBRICKS_KIMODO_DIR"); directory != "" {
+		if err = demo.loadKimodo(directory); err != nil {
+			t.Fatal(err)
+		}
+	}
 	server := httptest.NewServer(demo.routes())
 	defer server.Close()
 
@@ -232,7 +268,7 @@ func TestHeadlessChrome(t *testing.T) {
 			t.Logf("browser exception: %s", event.ExceptionDetails.Text)
 		}
 	})
-	ctx, cancel := context.WithTimeout(browser, 30*time.Second)
+	ctx, cancel := context.WithTimeout(browser, 55*time.Second)
 	defer cancel()
 
 	waitFor := func(expression, description string) chromedp.Action {
@@ -253,12 +289,16 @@ func TestHeadlessChrome(t *testing.T) {
 			return fmt.Errorf("%w for %s: %#v", errors.New("timeout waiting for browser"), description, diagnostic)
 		})
 	}
-	var initialScreenshot, movingScreenshot, screenshot []byte
+	var initialScreenshot, kimodoScreenshot, jumpScreenshot, movingScreenshot, screenshot []byte
 	var viewportCenter struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
 	}
 	var message string
+	uploadPath := filepath.Join(t.TempDir(), "uploaded-walk.glb")
+	if err = os.WriteFile(uploadPath, testAnimationGLB(t, demo.joints, "g1skel34"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	err = chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			if enableErr := cdplog.Enable().Do(ctx); enableErr != nil {
@@ -268,12 +308,34 @@ func TestHeadlessChrome(t *testing.T) {
 		}),
 		chromedp.Navigate(server.URL+"/"),
 		waitFor(`document.documentElement.dataset.testStatus === "ready"`, "initial plan"),
+		chromedp.SetUploadFiles(`#kimodo-file`, []string{uploadPath}, chromedp.ByQuery),
+		waitFor(`document.querySelector('#kimodo-upload-status').textContent.startsWith('Imported uploaded-walk.glb') && document.querySelector('#kimodo-select').value.startsWith('upload-')`, "GLB upload and automatic selection"),
+		chromedp.Click(`.pad button[data-key="w"]`, chromedp.ByQuery),
+		waitFor(`Math.hypot(Number(document.documentElement.dataset.plannedMoveX), Number(document.documentElement.dataset.plannedMoveZ)) > 0.9`, "walking before imported animation"),
+		chromedp.Evaluate(`(() => { const d = document.documentElement.dataset; d.resumeTestX = d.plannedMoveX; d.resumeTestZ = d.plannedMoveZ; })()`, nil),
 		chromedp.FullScreenshot(&initialScreenshot, 90),
+		chromedp.Click(`#kimodo-play`, chromedp.ByQuery),
+		waitFor(`document.documentElement.dataset.kimodoState === "playing" && document.documentElement.dataset.controlsLocked === "true" && document.querySelector('#jump').disabled && [...document.querySelectorAll('.pad button')].every(button => button.disabled)`, "non-interruptible Kimodo playback"),
+		chromedp.Sleep(500*time.Millisecond),
+		chromedp.FullScreenshot(&kimodoScreenshot, 90),
+		waitFor(`document.documentElement.dataset.kimodoState === "complete" && document.documentElement.dataset.controlsLocked === "false" && Number(document.documentElement.dataset.planSequence) >= 2`, "Kimodo exit context and MotionBricks resume"),
+		waitFor(`document.documentElement.dataset.plannedMoveX === document.documentElement.dataset.resumeTestX && document.documentElement.dataset.plannedMoveZ === document.documentElement.dataset.resumeTestZ && document.querySelector('.pad button[data-key="w"]').getAttribute('aria-pressed') === 'true'`, "walking action restored after imported animation"),
+		chromedp.Click(`#jump`, chromedp.ByQuery),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 2 && document.documentElement.dataset.plannedJump === "true" && Number(document.documentElement.dataset.plannedSpeed) === 5 && Number(document.documentElement.dataset.jumpTargetDistance) > 4 && Number(document.documentElement.dataset.jumpTargetVelocity) > 3`, "jump speed override and distant high-velocity standard keyframes"),
+		chromedp.Sleep(650*time.Millisecond),
+		waitFor(`document.documentElement.dataset.plannedJump === "true" && document.querySelector('#jump').disabled`, "jump survives the 16-frame walking replan"),
+		chromedp.Click(`#show-all-targets`, chromedp.ByQuery),
+		chromedp.Sleep(100*time.Millisecond),
+		chromedp.FullScreenshot(&jumpScreenshot, 90),
+		waitFor(`document.documentElement.dataset.plannedJump === "false" && !document.querySelector('#jump').disabled`, "normal planning resumes after the complete jump"),
+		chromedp.Navigate(server.URL+"/"),
+		waitFor(`document.documentElement.dataset.testStatus === "ready"`, "fresh movement session"),
 		chromedp.Click(`.pad button[data-key="w"]`, chromedp.ByQuery),
 		waitFor(`Number(document.documentElement.dataset.planSequence) >= 2 && Math.abs(Number(document.documentElement.dataset.plannedMoveX) + Math.sin(Number(document.documentElement.dataset.cameraYaw))) < 1e-5 && Math.abs(Number(document.documentElement.dataset.plannedMoveZ) + Math.cos(Number(document.documentElement.dataset.cameraYaw))) < 1e-5`, "camera-forward pad-button plan"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 3 && document.documentElement.dataset.plannedAdvance === "16" && document.documentElement.dataset.controllerCadenceFrames === "16" && Number(document.documentElement.dataset.plannedMoveX) !== 0`, "sustained movement across the 16-frame controller cadence"),
 		chromedp.FullScreenshot(&movingScreenshot, 90),
 		chromedp.Click(`.pad button[data-key="w"]`, chromedp.ByQuery),
-		waitFor(`Number(document.documentElement.dataset.planSequence) >= 3 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "pad-button stop plan"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 4 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "pad-button stop plan"),
 		chromedp.Evaluate(`(() => { const bounds = document.querySelector('#viewport').getBoundingClientRect(); return {x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2}; })()`, &viewportCenter),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			if err := cdpinput.DispatchMouseEvent(cdpinput.MousePressed, viewportCenter.X, viewportCenter.Y).WithButton(cdpinput.Left).WithButtons(1).WithClickCount(1).Do(ctx); err != nil {
@@ -286,9 +348,9 @@ func TestHeadlessChrome(t *testing.T) {
 		}),
 		waitFor(`Math.abs(Number(document.documentElement.dataset.cameraYaw) - 0.68) > 0.5`, "camera orbit"),
 		chromedp.Evaluate(`dispatchEvent(new KeyboardEvent("keydown", {key:"d", bubbles:true}))`, nil),
-		waitFor(`Number(document.documentElement.dataset.planSequence) >= 4 && Math.abs(Number(document.documentElement.dataset.plannedMoveX) - Math.cos(Number(document.documentElement.dataset.cameraYaw))) < 1e-5 && Math.abs(Number(document.documentElement.dataset.plannedMoveZ) + Math.sin(Number(document.documentElement.dataset.cameraYaw))) < 1e-5`, "camera-right keyboard plan after orbit"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 5 && Math.abs(Number(document.documentElement.dataset.plannedMoveX) - Math.cos(Number(document.documentElement.dataset.cameraYaw))) < 1e-5 && Math.abs(Number(document.documentElement.dataset.plannedMoveZ) + Math.sin(Number(document.documentElement.dataset.cameraYaw))) < 1e-5`, "camera-right keyboard plan after orbit"),
 		chromedp.Evaluate(`dispatchEvent(new KeyboardEvent("keyup", {key:"d", bubbles:true}))`, nil),
-		waitFor(`Number(document.documentElement.dataset.planSequence) >= 5 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "keyboard stop plan"),
+		waitFor(`Number(document.documentElement.dataset.planSequence) >= 6 && document.documentElement.dataset.plannedMoveX === "0" && document.documentElement.dataset.plannedMoveZ === "0"`, "keyboard stop plan"),
 		chromedp.Navigate(server.URL+"/?test=1"),
 		waitFor(`document.documentElement.dataset.testStatus === "passed" || document.documentElement.dataset.testStatus === "failed"`, "style-and-turn self-test"),
 		chromedp.Text("#test-result", &message, chromedp.ByQuery),
@@ -304,8 +366,8 @@ func TestHeadlessChrome(t *testing.T) {
 	if status != "passed" {
 		t.Fatalf("browser self-test status=%q: %s", status, message)
 	}
-	if len(initialScreenshot) < 10_000 || len(movingScreenshot) < 10_000 || len(screenshot) < 10_000 {
-		t.Fatalf("rendered screenshots are unexpectedly small: initial=%d moving=%d final=%d", len(initialScreenshot), len(movingScreenshot), len(screenshot))
+	if len(initialScreenshot) < 10_000 || len(kimodoScreenshot) < 10_000 || len(jumpScreenshot) < 10_000 || len(movingScreenshot) < 10_000 || len(screenshot) < 10_000 {
+		t.Fatalf("rendered screenshots are unexpectedly small: initial=%d kimodo=%d jump=%d moving=%d final=%d", len(initialScreenshot), len(kimodoScreenshot), len(jumpScreenshot), len(movingScreenshot), len(screenshot))
 	}
 	artifact := os.Getenv("MOTIONBRICKS_SCREENSHOT")
 	if artifact == "" {
@@ -321,15 +383,21 @@ func TestHeadlessChrome(t *testing.T) {
 		data []byte
 	}{
 		{path: base + "-initial" + extension, data: initialScreenshot},
+		{path: base + "-kimodo" + extension, data: kimodoScreenshot},
+		{path: base + "-jump" + extension, data: jumpScreenshot},
 		{path: base + "-moving" + extension, data: movingScreenshot},
 		{path: artifact, data: screenshot},
 	}
 	for _, item := range artifacts {
+		if len(item.data) == 0 {
+			continue
+		}
 		if err = os.WriteFile(item.path, item.data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Logf("%s; screenshots: %s, %s, %s (final %s)", message, artifacts[0].path, artifacts[1].path, artifacts[2].path, fmt.Sprintf("%d bytes", len(screenshot)))
+	t.Logf("%s; screenshots: %s, %s, %s, %s, %s (final %s)", message, artifacts[0].path, artifacts[1].path,
+		artifacts[2].path, artifacts[3].path, artifacts[4].path, fmt.Sprintf("%d bytes", len(screenshot)))
 }
 
 func TestHeadlessReplay(t *testing.T) {

@@ -29,6 +29,9 @@ struct transition_constraints {
 // Internal diagnostic boundary used only by parity tooling. These values are
 // copied after each stage and are not part of the installed C ABI.
 struct transition_trace {
+    // Wall time in milliseconds for root planning, pose planning, VQ decoding,
+    // and representation decoding. Collected only when tracing is enabled.
+    std::array<double,4> stage_ms{};
     transition_constraints constraints;
     std::vector<float> normalized_global_root;
     std::vector<float> normalized_local_root;

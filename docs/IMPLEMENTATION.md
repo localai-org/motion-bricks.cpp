@@ -86,8 +86,12 @@ arithmetic error while remaining ten times tighter than the upstream behavior
 gate. Camera-relative pad and WASD control is covered before and after a real
 headless-browser orbit.
 
+The upstream four-frame context-output blend is implemented and validated
+against 14 captured pre/post-filter transitions: root values match exactly and
+the worst sign-invariant physical-joint quaternion component error is
+4.33e-7 (0.000050 degrees).
+
 Still outstanding from the wider plan are direct Kimodo GLB style import,
-context-output blending,
 Gumbel sampling, graph/buffer caching and performance work, binary browser
 streaming, fuzzing, and optimized weight formats. The human-led
 `motions-bricks.md` remains unchanged.

@@ -243,6 +243,7 @@ def capture(
     trace_targets: bool = False,
     trace_neural_plan: int | None = None,
     trace_neural_all: bool = False,
+    trace_blend: bool = False,
 ) -> None:
     if os.environ.get("MOTIONBRICKS_REFERENCE_CONTAINER") != "1":
         raise RuntimeError("session capture must run in the pinned reference session container")
@@ -470,6 +471,11 @@ def capture(
             if pending_features is not None:
                 raise RuntimeError("a new plan arrived before the previous public feature result")
             plans[next_plan] = {"qpos": clone_cpu(generated[0], torch)}
+            if trace_blend:
+                raw_qpos = demo.full_agent.frames.get("raw_mujoco_qpos")
+                if raw_qpos is None:
+                    raise RuntimeError("upstream FILTER_QPOS did not retain its pre-filter qpos")
+                plans[next_plan]["raw_qpos"] = clone_cpu(raw_qpos[:, :valid_length], torch)
             if next_plan in neural_traces:
                 plans[next_plan].update(neural_traces.pop(next_plan))
             if trace_targets:
@@ -537,13 +543,18 @@ def capture(
         if token_index >= allowed.numel() or int(allowed[token_index].item()) != 1:
             raise RuntimeError(f"plan {event['plan']} selected a disallowed duration")
         tensors = plans[event["plan"]]
-        if not {"qpos", "model_features"}.issubset(tensors):
+        required_plan_tensors = {"qpos", "model_features"}
+        if trace_blend:
+            required_plan_tensors.add("raw_qpos")
+        if not required_plan_tensors.issubset(tensors):
             raise RuntimeError(f"plan {event['plan']} is missing a public output tensor")
         if tensors["qpos"].ndim != 3 or tensors["qpos"].shape[:2] != (1, valid_length):
             raise RuntimeError(f"plan {event['plan']} has inconsistent qpos shape")
         if (tensors["model_features"].ndim != 3 or
                 tensors["model_features"].shape[:2] != (1, valid_length)):
             raise RuntimeError(f"plan {event['plan']} has inconsistent model-feature shape")
+        if trace_blend and tensors["raw_qpos"].shape != tensors["qpos"].shape:
+            raise RuntimeError(f"plan {event['plan']} has inconsistent raw qpos shape")
 
     output.mkdir(parents=True)
     playback = {
@@ -609,6 +620,7 @@ def capture(
             "target_boundaries": trace_targets,
             "neural_plan": trace_neural_plan,
             "neural_all": trace_neural_all,
+            "context_blend": trace_blend,
             "mechanism": {
                 "targets": "external_instance_post_return_wrapper" if trace_targets else "disabled",
                 "neural": "external_instance_wrappers_and_forward_hooks" if trace_neural_enabled else "disabled",
@@ -663,6 +675,7 @@ def main() -> None:
     parser.add_argument("--artifact-limit-mb", type=int, default=ARTIFACT_LIMIT_BYTES // (1024 * 1024))
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--trace-targets", action="store_true")
+    parser.add_argument("--trace-blend", action="store_true")
     neural_group = parser.add_mutually_exclusive_group()
     neural_group.add_argument("--trace-neural-plan", type=int)
     neural_group.add_argument("--trace-neural-all", action="store_true")
@@ -674,7 +687,7 @@ def main() -> None:
         parser.error("--output is required unless --preflight-only is used")
     capture(args.upstream_root.resolve(), args.output.resolve(), args.seed,
             args.artifact_limit_mb * 1024 * 1024, args.trace_targets,
-            args.trace_neural_plan, args.trace_neural_all)
+            args.trace_neural_plan, args.trace_neural_all, args.trace_blend)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,10 @@ struct mb_command {
     std::array<float, 3> world_target{0.0F, 0.0F, 0.0F};
     float world_target_heading = 0.0F;
     std::uint32_t has_world_target = 0;
+    // Internal diagnostic switch. The public controller always applies the
+    // upstream four-frame playback seam; the parity runner disables it when
+    // comparing the raw neural output stored in an open-loop fixture.
+    std::uint32_t skip_context_blend = 0;
     std::uint64_t seed = 0;
 };
 

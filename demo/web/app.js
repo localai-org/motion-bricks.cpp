@@ -16,6 +16,18 @@ const replayFrame = document.querySelector('#replay-frame');
 const replayFrameLabel = document.querySelector('#replay-frame-label');
 const comparisonPlanRow = document.querySelector('#comparison-plan-row');
 const comparisonPlan = document.querySelector('#comparison-plan');
+const jumpButton = document.querySelector('#jump');
+const kimodoControls = document.querySelector('#kimodo-controls');
+const kimodoSelect = document.querySelector('#kimodo-select');
+const kimodoPlay = document.querySelector('#kimodo-play');
+const kimodoUpload = document.querySelector('#kimodo-upload');
+const kimodoFile = document.querySelector('#kimodo-file');
+const kimodoUploadStatus = document.querySelector('#kimodo-upload-status');
+let uploadingAnimation = false;
+const kimodoProgress = document.querySelector('#kimodo-progress');
+const kimodoPhase = document.querySelector('#kimodo-phase');
+const kimodoProgressBar = document.querySelector('#kimodo-progress-bar');
+const kimodoProgressLabel = document.querySelector('#kimodo-progress-label');
 const query = new URLSearchParams(location.search);
 
 const state = {
@@ -26,6 +38,7 @@ const state = {
   replay: null, replayPlaying: true, replayPlan: -2,
   comparison: null, comparisonPlan: -1, comparisonShowcase: null,
   comparisonVisiblePlan: -1, nativeRig: null, errorLines: null,
+  kimodo: null, jumpActive: false, controlsLocked: false, qaPaused: false,
 };
 
 const modeNames = [
@@ -33,6 +46,8 @@ const modeNames = [
   'stealth_walk', 'injured_walk', 'walk_stealth', 'walk_happy_dance', 'walk_zombie',
   'walk_gun', 'walk_scared', 'walk_left', 'walk_right',
 ];
+const controllerCadenceFrames = 16;
+const jumpTargetSpeed = 5.0;
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x090b10, 0.045);
@@ -105,16 +120,17 @@ class SkeletonRig {
     this.boneMaterial = new THREE.MeshStandardMaterial({
       color: options.color, emissive: options.emissive, emissiveIntensity: options.emissiveIntensity,
       roughness: 0.42, transparent: options.opacity < 1, opacity: options.opacity,
-      depthWrite: options.opacity >= 0.95,
+      depthWrite: options.opacity >= 0.95, depthTest: options.depthTest ?? true,
     });
     this.jointMaterial = new THREE.MeshStandardMaterial({
       color: options.jointColor, emissive: options.emissive, emissiveIntensity: options.emissiveIntensity,
       roughness: 0.35, transparent: options.opacity < 1, opacity: options.opacity,
-      depthWrite: options.opacity >= 0.95,
+      depthWrite: options.opacity >= 0.95, depthTest: options.depthTest ?? true,
     });
     this.rootMaterial = new THREE.MeshStandardMaterial({
       color: options.rootColor, emissive: options.rootEmissive, emissiveIntensity: 1.4,
       transparent: options.opacity < 1, opacity: options.opacity, depthWrite: options.opacity >= 0.95,
+      depthTest: options.depthTest ?? true,
     });
     for (let index = 0; index < joints.length; index++) {
       const joint = joints[index];
@@ -259,7 +275,7 @@ function makeSkeletons(joints) {
       color: palette.bone, jointColor: palette.joint, rootColor: palette.root,
       emissive: palette.emissive, rootEmissive: palette.emissive, emissiveIntensity: 1,
       radius: 0.018, jointRadius: 0.032, rootRadius: 0.056, opacity: 0.9, diamonds: true,
-      renderOrder: 8 + frame, label: `T${frame}`, labelColor: palette.label,
+      depthTest: false, renderOrder: 8 + frame, label: `T${frame}`, labelColor: palette.label,
       labelHeight: 0.34 + (3 - frame) * 0.11,
     }));
   }
@@ -428,19 +444,90 @@ function installStyles(styles) {
   styleSelect.addEventListener('change', () => { state.style = styleSelect.value; void requestPlan(); });
 }
 
-function useMotion(response, plannedMove = state.move) {
+function installKimodo(clips) {
+  for (const clip of clips || []) {
+    if ([...kimodoSelect.options].some(option => option.value === clip.id)) continue;
+    const option = document.createElement('option');
+    option.value = clip.id;
+    option.textContent = `${clip.name} · ${clip.duration.toFixed(1)} s · ${clip.id.split('/').at(-1)}`;
+    option.title = clip.prompt;
+    kimodoSelect.append(option);
+  }
+  kimodoControls.hidden = false;
+  kimodoPlay.disabled = state.controlsLocked || state.jumpActive || !kimodoSelect.value;
+}
+
+kimodoUpload.addEventListener('click', () => kimodoFile.click());
+kimodoFile.addEventListener('change', async () => {
+  const file = kimodoFile.files[0];
+  if (!file || uploadingAnimation || state.controlsLocked) return;
+  uploadingAnimation = true;
+  kimodoUpload.disabled = true;
+  kimodoUploadStatus.dataset.error = 'false';
+  kimodoUploadStatus.textContent = `Uploading ${file.name}…`;
+  try {
+    if (file.size > 16 * 1024 * 1024) throw new Error('Animation upload must be at most 16 MiB.');
+    const form = new FormData();
+    form.append('animation', file);
+    const response = await fetch('/api/kimodo/upload', {method: 'POST', body: form});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Upload failed (${response.status}).`);
+    installKimodo([result]);
+    kimodoSelect.value = result.id;
+    kimodoPlay.disabled = state.controlsLocked || state.jumpActive;
+    kimodoUploadStatus.textContent = `Imported ${result.name} (${result.duration.toFixed(1)} s). Press Play to start.`;
+  } catch (error) {
+    kimodoUploadStatus.dataset.error = 'true';
+    kimodoUploadStatus.textContent = error.message;
+  } finally {
+    uploadingAnimation = false;
+    kimodoUpload.disabled = state.controlsLocked;
+    kimodoFile.value = '';
+  }
+});
+
+function lockMotionControls(locked) {
+  state.controlsLocked = locked;
+  styleSelect.disabled = locked;
+  jumpButton.disabled = locked || state.jumpActive;
+  kimodoSelect.disabled = locked;
+  kimodoPlay.disabled = locked || state.jumpActive || !kimodoSelect.value;
+  kimodoUpload.disabled = locked || uploadingAnimation;
+  document.querySelectorAll('.pad button').forEach(button => { button.disabled = locked; });
+  document.documentElement.dataset.controlsLocked = String(locked);
+}
+
+function useMotion(response, plannedMove = state.move, playhead = 0, plannedAdvance = 0,
+                   plannedJump = false, plannedSpeed = null) {
   state.session = response.session;
   state.style = response.style;
-  styleSelect.value = response.style;
+  styleSelect.value = state.style;
   state.motion = response.motion;
+  state.jumpActive = plannedJump;
+  jumpButton.disabled = plannedJump || state.controlsLocked;
+  kimodoPlay.disabled = plannedJump || state.controlsLocked || !kimodoSelect.value;
   state.targets = response.targets;
-  state.playhead = 0;
+  state.playhead = Math.min(playhead, response.motion.frames - 1);
   state.lastTime = performance.now();
-  planInfo.textContent = `${response.motion.frames} frames · ${response.style.replaceAll('_', ' ')}`;
+  const target = (response.targets.frames - 1) * 3;
+  const previousTarget = target - 3;
+  const jumpTargetDistance = Math.hypot(response.targets.roots[target] - response.motion.roots[0],
+    response.targets.roots[target + 2] - response.motion.roots[2]);
+  const jumpTargetVelocity = state.meta.fps * Math.hypot(
+    response.targets.roots[target] - response.targets.roots[previousTarget],
+    response.targets.roots[target + 2] - response.targets.roots[previousTarget + 2]);
+  planInfo.textContent = `${response.motion.frames} frames · ${response.style.replaceAll('_', ' ')}` +
+    (plannedJump ? ` · jump ${jumpTargetDistance.toFixed(2)} m target · ${jumpTargetVelocity.toFixed(2)} m/s` : '');
   statusElement.textContent = 'Playing';
   document.documentElement.dataset.planSequence = String(Number(document.documentElement.dataset.planSequence || 0) + 1);
   document.documentElement.dataset.plannedMoveX = String(plannedMove[0]);
   document.documentElement.dataset.plannedMoveZ = String(plannedMove[1]);
+  document.documentElement.dataset.plannedAdvance = String(plannedAdvance);
+  document.documentElement.dataset.controllerCadenceFrames = String(controllerCadenceFrames);
+  document.documentElement.dataset.plannedJump = String(plannedJump);
+  document.documentElement.dataset.plannedSpeed = plannedSpeed === null ? '' : String(plannedSpeed);
+  document.documentElement.dataset.jumpTargetDistance = plannedJump ? String(jumpTargetDistance) : '0';
+  document.documentElement.dataset.jumpTargetVelocity = plannedJump ? String(jumpTargetVelocity) : '0';
   setGroundPath(state.generatedPath, response.motion.roots, response.motion.frames);
   setGroundPath(state.targetPath, response.targets.roots, response.targets.frames);
   for (let frame = 0; frame < response.targets.frames; frame++) {
@@ -449,21 +536,28 @@ function useMotion(response, plannedMove = state.move) {
   updateTargetVisibility();
 }
 
-async function requestPlan(advance = Math.floor(state.playhead)) {
-  if (!state.session) return null;
+async function requestPlan(advance = Math.floor(state.playhead), override = null) {
+  if (!state.session || state.controlsLocked || state.kimodo) return null;
+  // Do not discard the airborne part at the normal 16-frame walk cadence.
+  if (state.jumpActive && state.playhead < state.motion.frames - 1) return null;
   if (state.pending) {
     state.replanQueued = true;
     return null;
   }
   state.pending = true;
   statusElement.textContent = 'Planning…';
-  const plannedMove = [...state.move];
+  const plannedMove = override?.move ?? [...state.move];
+  const plannedSpeed = override?.speed ?? null;
   try {
     const response = await api('/api/plan', {
-      session: state.session, style: state.style, move: state.move, facing: state.facing,
-      seed: state.seed++, advance,
+      session: state.session, style: state.style, move: plannedMove, facing: state.facing,
+      speed: plannedSpeed ?? undefined, seed: state.seed++, advance,
     });
-    useMotion(response, plannedMove);
+    // Frame zero of the replacement is the context at `advance`. Keep any
+    // playback time that elapsed while inference was running instead of
+    // visibly jumping back to that boundary when the response arrives.
+    const replacementPlayhead = Math.max(0, state.playhead - advance);
+    useMotion(response, plannedMove, replacementPlayhead, advance, override?.jump === true, plannedSpeed);
     return response;
   } finally {
     state.pending = false;
@@ -471,6 +565,23 @@ async function requestPlan(advance = Math.floor(state.playhead)) {
       state.replanQueued = false;
       queueMicrotask(() => void requestPlan(Math.floor(state.playhead)));
     }
+  }
+}
+
+async function beginJump() {
+  if (!state.motion || state.pending || state.controlsLocked || state.jumpActive) return;
+  const source = Math.hypot(state.move[0], state.move[1]) > 1e-6 ? state.move : state.facing;
+  const length = Math.hypot(source[0], source[1]);
+  const jumpMove = length > 1e-6 ? [source[0] / length, source[1] / length] : [0, 1];
+  jumpButton.disabled = true;
+  jumpButton.setAttribute('aria-pressed', 'true');
+  try {
+    await requestPlan(Math.floor(state.playhead), {
+      jump: true, move: jumpMove, speed: jumpTargetSpeed,
+    });
+  } finally {
+    jumpButton.disabled = state.jumpActive || state.controlsLocked;
+    jumpButton.setAttribute('aria-pressed', 'false');
   }
 }
 
@@ -501,10 +612,102 @@ function updateControl() {
   });
 }
 
+function currentPose() {
+  const frame = THREE.MathUtils.clamp(Math.floor(state.playhead), 0, state.motion.frames - 1);
+  return {
+    frame,
+    root: state.motion.roots.slice(frame * 3, frame * 3 + 3),
+    rotations: state.motion.rotations.slice(frame * state.motion.joints * 4, (frame + 1) * state.motion.joints * 4),
+  };
+}
+
+async function beginKimodo() {
+  if (!state.motion || state.pending || state.controlsLocked || state.jumpActive || !kimodoSelect.value) return;
+  const resume = {move: [...state.move], facing: [...state.facing], style: state.style, padKey: state.padKey};
+  clearTimeout(controlTimer);
+  state.keys.clear(); state.padKey = ''; state.move = [0, 0]; updateControl();
+  const pose = currentPose();
+  lockMotionControls(true);
+  kimodoProgress.hidden = false;
+  kimodoPhase.textContent = 'Preparing entry blend…';
+  kimodoProgressBar.value = 0;
+  kimodoProgressLabel.textContent = '0%';
+  statusElement.textContent = 'Loading Kimodo sequence…';
+  try {
+    const response = await api('/api/kimodo/start', {
+      session: state.session, clip: kimodoSelect.value, advance: pose.frame,
+      current_root: pose.root, current_rotations: pose.rotations,
+    });
+    state.motion = response.motion;
+    state.targets = {frames: 0, joints: response.motion.joints, roots: [], rotations: []};
+    state.playhead = 0;
+    state.lastTime = performance.now();
+    state.kimodo = {clip: response.clip, entryFrames: response.entry_frames, finishing: false, resume};
+    setGroundPath(state.generatedPath, response.motion.roots, response.motion.frames);
+    state.targetPath.visible = false;
+    updateTargetVisibility();
+    planInfo.textContent = `${response.clip.frames} authored frames · ${response.clip.name}`;
+    statusElement.textContent = 'Kimodo sequence playing · controls locked';
+    document.documentElement.dataset.kimodoState = 'playing';
+    document.documentElement.dataset.kimodoClip = response.clip.id;
+    document.documentElement.dataset.kimodoEntryFrames = String(response.entry_frames);
+  } catch (error) {
+    restoreKimodoAction(resume);
+    kimodoProgress.hidden = true;
+    lockMotionControls(false);
+    statusElement.textContent = 'Kimodo start failed';
+    throw error;
+  }
+}
+
+function restoreKimodoAction(resume) {
+  state.move = [...resume.move];
+  state.facing = [...resume.facing];
+  state.style = resume.style;
+  state.padKey = resume.padKey;
+  for (const button of document.querySelectorAll('.pad button')) {
+    const pressed = button.dataset.key === state.padKey;
+    button.classList.toggle('active', pressed);
+    button.setAttribute('aria-pressed', String(pressed));
+  }
+}
+
+async function finishKimodo() {
+  if (!state.kimodo || state.kimodo.finishing) return;
+  state.kimodo.finishing = true;
+  kimodoPhase.textContent = 'Blending back to MotionBricks…';
+  statusElement.textContent = 'Planning exit blend…';
+  const resume = state.kimodo.resume;
+  // Preserve the pre-clip action and its world-space movement/facing. The
+  // authored clip may turn, but must not silently replace walking with idle.
+  const facing = resume.facing;
+  try {
+    const response = await api('/api/kimodo/finish', {
+      session: state.session, style: resume.style, move: resume.move, facing, seed: state.seed++,
+    });
+    state.kimodo = null;
+    restoreKimodoAction(resume);
+    useMotion(response, resume.move, 0, 0);
+    kimodoProgress.hidden = true;
+    lockMotionControls(false);
+    document.documentElement.dataset.kimodoState = 'complete';
+  } catch (error) {
+    state.kimodo.finishing = false;
+    statusElement.textContent = 'Kimodo exit failed · controls remain locked';
+    document.documentElement.dataset.kimodoState = 'error';
+    console.error(error);
+  }
+}
+
 let controlTimer = 0;
 function schedulePlan(delay = 0) { clearTimeout(controlTimer); controlTimer = setTimeout(() => void requestPlan(), delay); }
 addEventListener('keydown', event => {
+  if (state.controlsLocked) {
+    if (['j', 'w', 'a', 's', 'd', 'arrowleft', 'arrowright', ' ', 'escape'].includes(event.key.toLowerCase())) event.preventDefault();
+    return;
+  }
   const key = event.key.toLowerCase();
+  if (key === 'j' && !event.repeat) { beginJump(); event.preventDefault(); }
   if (['w', 'a', 's', 'd'].includes(key) && !state.keys.has(key)) {
     state.keys.add(key); updateControl(); schedulePlan(); event.preventDefault();
   }
@@ -516,6 +719,9 @@ addEventListener('keydown', event => {
     state.facing = [Math.sin(angle), Math.cos(angle)]; schedulePlan(35); event.preventDefault();
   }
 });
+jumpButton.addEventListener('click', beginJump);
+kimodoPlay.addEventListener('click', () => { void beginKimodo(); });
+jumpButton.setAttribute('aria-pressed', 'false');
 addEventListener('keyup', event => {
   const key = event.key.toLowerCase();
   if (state.keys.delete(key)) { updateControl(); schedulePlan(); }
@@ -552,6 +758,50 @@ function renderMotion(frame) {
   const index = Math.min(state.motion.frames - 1, Math.max(0, frame));
   state.rig.pose(state.motion.roots, state.motion.rotations, index, state.motion.frames);
   updateCamera();
+}
+
+function installMotionQAHook() {
+  if (query.get('qa') !== '1') return;
+  window.__motionBricksQA = {
+    pause(value = true) {
+      state.qaPaused = value;
+      state.lastTime = performance.now();
+    },
+    setFrame(frame) {
+      if (!state.motion) return;
+      state.playhead = THREE.MathUtils.clamp(Number(frame), 0, state.motion.frames - 1);
+      renderMotion(Math.floor(state.playhead));
+      renderer.render(scene, camera);
+    },
+    snapshot() {
+      if (!state.motion) return null;
+      const frame = THREE.MathUtils.clamp(Math.floor(state.playhead), 0, state.motion.frames - 1);
+      renderMotion(frame);
+      return {
+        frame,
+        root: state.motion.roots.slice(frame * 3, frame * 3 + 3),
+        rotations: state.motion.rotations.slice(frame * state.motion.joints * 4, (frame + 1) * state.motion.joints * 4),
+        joint_positions: state.rig.jointMeshes.flatMap(marker => marker.position.toArray()),
+        motion_frames: state.motion.frames,
+        joints: state.motion.joints,
+        kimodo_state: document.documentElement.dataset.kimodoState || 'inactive',
+        controls_locked: state.controlsLocked,
+        entry_frames: state.kimodo?.entryFrames ?? 0,
+        clip_frames: state.kimodo?.clip.frames ?? 0,
+        clip_id: state.kimodo?.clip.id ?? '',
+      };
+    },
+    motion() {
+      if (!state.motion) return null;
+      return {
+        frames: state.motion.frames, joints: state.motion.joints,
+        roots: state.motion.roots, rotations: state.motion.rotations,
+        entry_frames: state.kimodo?.entryFrames ?? 0,
+        clip_frames: state.kimodo?.clip.frames ?? 0,
+      };
+    },
+  };
+  document.documentElement.dataset.motionQA = 'available';
 }
 
 function replayRootPath(values, frames, joints, base = 0) {
@@ -697,7 +947,7 @@ function renderReplay(frame) {
 
 function animate(now) {
   requestAnimationFrame(animate);
-  const delta = Math.min(0.1, (now - state.lastTime) / 1000);
+  const delta = state.qaPaused ? 0 : Math.min(0.1, (now - state.lastTime) / 1000);
   state.lastTime = now;
   if (state.comparison) {
     const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
@@ -710,7 +960,25 @@ function animate(now) {
     renderReplay(Math.floor(state.playhead));
   } else if (state.motion) {
     state.playhead += delta * state.meta.fps;
-    if (state.playhead >= state.motion.frames - 5 && !state.pending) void requestPlan(Math.floor(state.playhead));
+    if (state.kimodo) {
+      const authoredFrame = state.playhead - state.kimodo.entryFrames;
+      const progress = THREE.MathUtils.clamp(authoredFrame / Math.max(1, state.kimodo.clip.frames - 1), 0, 1);
+      kimodoProgressBar.value = progress;
+      kimodoProgressLabel.textContent = `${Math.round(progress * 100)}%`;
+      kimodoPhase.textContent = authoredFrame < 0 ? 'Blending into Kimodo…'
+        : (state.kimodo.finishing ? 'Blending back to MotionBricks…' : 'Kimodo sequence playing');
+      document.documentElement.dataset.kimodoProgress = String(progress);
+      if (state.playhead >= state.motion.frames - 1) {
+        state.playhead = state.motion.frames - 1;
+        void finishKimodo();
+      }
+    } else {
+      const moving = Math.hypot(state.move[0], state.move[1]) > 1e-6;
+      if (state.jumpActive && state.playhead >= state.motion.frames - 1 && !state.pending)
+        void requestPlan(state.motion.frames - 1);
+      else if (!state.jumpActive && moving && state.playhead >= controllerCadenceFrames && !state.pending)
+        void requestPlan(controllerCadenceFrames);
+    }
     renderMotion(Math.floor(state.playhead));
   }
   renderer.render(scene, camera);
@@ -832,6 +1100,7 @@ async function startReplay() {
   setGroundPath(state.generatedPath, replayRootPath(state.replay.jointPositions, state.replay.frames, state.replay.joints), state.replay.frames);
   document.querySelector('#live-style').hidden = true;
   document.querySelector('.pad').hidden = true;
+  document.querySelector('.live-actions').hidden = true;
   replayControls.hidden = false;
   replayFrame.max = String(state.replay.frames - 1);
   document.querySelector('#lede').textContent = 'Deterministic replay of the captured upstream session. Scrub or play without invoking either planner.';
@@ -904,6 +1173,7 @@ async function startComparison() {
   }
   document.querySelector('#live-style').hidden = true;
   document.querySelector('.pad').hidden = true;
+  document.querySelector('.live-actions').hidden = true;
   document.querySelector('.target-frame-control').hidden = true;
   document.querySelector('.view-options label').hidden = true;
   document.querySelector('.target-help').hidden = true;
@@ -937,7 +1207,9 @@ async function start() {
       return;
     }
     installStyles(state.meta.styles);
+    installKimodo(state.meta.kimodo_clips);
     makeSkeletons(state.meta.joints);
+    installMotionQAHook();
     const initial = await api('/api/session', {style: state.style});
     useMotion(initial);
     renderMotion(0);

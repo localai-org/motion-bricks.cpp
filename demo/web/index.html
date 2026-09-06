@@ -22,6 +22,22 @@
         <label for="style-select">Upstream pose style</label>
         <select id="style-select" aria-label="Motion style"></select>
       </div>
+      <section id="kimodo-controls" hidden>
+        <label for="kimodo-select">Authored Kimodo sequence</label>
+        <div class="kimodo-picker">
+          <select id="kimodo-select" aria-label="Kimodo animation"></select>
+          <button id="kimodo-play" type="button">Play</button>
+        </div>
+        <button id="kimodo-upload" type="button">Upload animation GLB</button>
+        <input id="kimodo-file" type="file" accept=".glb,model/gltf-binary" hidden>
+        <p class="upload-help">Kimodo G1 skeleton · up to 16 MiB / 10 minutes. Uploads remain available until the server restarts.</p>
+        <p id="kimodo-upload-status" role="status" aria-live="polite"></p>
+        <div id="kimodo-progress" hidden aria-live="polite">
+          <div><strong id="kimodo-phase">Kimodo sequence playing</strong><output id="kimodo-progress-label">0%</output></div>
+          <progress id="kimodo-progress-bar" max="1" value="0">0%</progress>
+          <small>Authored playback is non-interruptible. Motion controls resume after the exit blend.</small>
+        </div>
+      </section>
       <div id="replay-controls" hidden>
         <label for="replay-frame">Captured frame <output id="replay-frame-label" for="replay-frame">0/0</output></label>
         <label id="comparison-plan-row" for="comparison-plan" hidden>Comparison playback
@@ -47,6 +63,9 @@
         <button data-key="a" data-x="-1" data-z="0" aria-label="Walk left">A</button>
         <button data-key="s" data-x="0" data-z="-1" aria-label="Walk backward">S</button>
         <button data-key="d" data-x="1" data-z="0" aria-label="Walk right">D</button>
+      </div>
+      <div class="live-actions">
+        <button id="jump" type="button" aria-keyshortcuts="J">Jump <kbd>J</kbd></button>
       </div>
       <dl>
         <div><dt>Status</dt><dd id="status">Loading model…</dd></div>

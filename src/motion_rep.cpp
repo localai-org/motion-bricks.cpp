@@ -234,6 +234,17 @@ mb_status encode_context(const mb_model & model,
                 for (unsigned axis = 0; axis < 3U; ++axis) position[axis] = parent_position[axis] + offset[axis];
             }
         }
+        // The caller has already canonicalized the context. Upstream's
+        // mujoco_qpos_converter (dummy scheme) inserts global identity for
+        // the four virtual endpoints absent from the physical G1 joints.
+        // Override conditioning matrices only: retain parent-derived FK
+        // positions and never modify the caller's authored local rotations.
+        constexpr mat3 identity{1,0,0,0,1,0,0,0,1};
+        for (const auto joint : {7U,14U,25U,33U}) {
+            auto * matrix = rotations.data() +
+                (static_cast<std::size_t>(frame) * g1_joint_count + joint) * 9U;
+            std::copy(identity.begin(), identity.end(), matrix);
+        }
     }
     return encode_global_frames(positions, rotations, false, output, reason);
 }

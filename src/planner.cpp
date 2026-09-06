@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <vector>
@@ -67,6 +68,12 @@ mb_status run_transition(const mb_model & model,
     }
 
     root_result root;
+    auto stage_start = std::chrono::steady_clock::now();
+    const auto finish_stage = [&](std::size_t index) {
+        const auto now = std::chrono::steady_clock::now();
+        if (trace) trace->stage_ms[index] = std::chrono::duration<double,std::milli>(now-stage_start).count();
+        stage_start = now;
+    };
     auto status = run_root_planner_auto_probe(*model.runtime, global, constraints.has_global_root,
         local, constraints.has_local_root, poses, constraints.has_poses, 6U, root, reason);
     if (status != MB_OK) return status;
@@ -88,6 +95,7 @@ mb_status run_transition(const mb_model & model,
         if (status != MB_OK) return status;
     }
     const std::uint32_t frames = tokens * 4U;
+    finish_stage(0U);
     if (trace != nullptr) {
         trace->duration_logits = root.duration_logits;
         trace->selected_tokens = tokens;
@@ -146,9 +154,11 @@ mb_status run_transition(const mb_model & model,
     }
     std::vector<std::int32_t> pose_tokens(static_cast<std::size_t>(tokens) * 8U, 10);
     std::vector<float> logits;
+    stage_start = std::chrono::steady_clock::now();
     status = run_pose_planner(*model.runtime, pose_tokens, pose_root, pose_condition,
                               has_pose_condition, tokens, tokens, logits, reason);
     if (status != MB_OK) return status;
+    finish_stage(1U);
     for (std::size_t item = 0; item < pose_tokens.size(); ++item) {
         const auto begin = logits.begin() + static_cast<std::ptrdiff_t>(item * 10U);
         pose_tokens[item] = static_cast<std::int32_t>(std::max_element(begin, begin + 10) - begin);
@@ -188,12 +198,15 @@ mb_status run_transition(const mb_model & model,
                                            has_pose_condition.end());
     if (trace != nullptr) trace->decoder_target_mask = decoder_mask;
     std::vector<float> decoded;
+    stage_start = std::chrono::steady_clock::now();
     status = run_vq_decoder(*model.runtime, quantized, external, pose_condition,
                             decoder_mask, tokens, decoded, reason);
     if (status != MB_OK) return status;
+    finish_stage(2U);
     if (trace != nullptr) trace->decoder_output = decoded;
     status = decode_motion(model, decoded, frames, initial_x, initial_z,
                            initial_heading, output, reason);
+    finish_stage(3U);
     if (status == MB_OK && selected_tokens != nullptr) *selected_tokens = tokens;
     return status;
 }

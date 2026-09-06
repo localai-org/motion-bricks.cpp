@@ -240,6 +240,7 @@ bool write_report(const std::filesystem::path & path, std::string_view device,
         << "  \"device\":\"" << device << "\",\n"
         << "  \"fps\":" << fixture.fps << ",\n  \"joints\":" << motionbricks::parity::joint_count
         << ",\n  \"passed\":" << (passed?"true":"false") << ",\n"
+        << "  \"comparison_layer\":\"raw_neural_output_before_playback_blend\",\n"
         << "  \"pose_token_ids\":\"unavailable at observational boundary\",\n"
         << "  \"tolerances\":{\"root_m\":0.01,\"rotation_deg\":2.0,\"joint_m\":0.02,"
            "\"target_root_m\":0.002,\"target_rotation_deg\":0.2,\"target_joint_m\":0.003},\n"
@@ -325,6 +326,11 @@ int run(const std::filesystem::path & fixture_path, const std::filesystem::path 
                 motionbricks::parity::context_frames,motionbricks::parity::joint_count,error.data(),error.size()),"set context",error.data()) ||
             !call(mb_command_create(&raw_command,error.data(),error.size()),"create command",error.data())) return 1;
         std::unique_ptr<mb_command,command_deleter> command(raw_command);
+        // open-loop.mbparity stores model_features, i.e. the output before
+        // upstream's separate FILTER_QPOS playback seam. Keep this gate about
+        // neural inference; agent_blend_test independently gates that seam
+        // against captured raw/filtered upstream qpos.
+        command->skip_context_blend=1U;
         auto * style=styles[static_cast<std::size_t>(expected.mode)].get();
         if (!call(mb_command_set_style(command.get(),style,error.data(),error.size()),"set style",error.data()) ||
             !call(mb_command_set_movement_direction(command.get(),expected.movement[0],expected.movement[1],expected.movement[2],error.data(),error.size()),"set movement",error.data()) ||

@@ -37,6 +37,53 @@ Run it from the repository root:
   -device cpu
 ```
 
+To expose Kimodo-authored G1 sequences alongside live planning, add a directory
+containing Kimodo's node-only `animation.glb` exports. It is scanned
+recursively; exports for other skeletons are ignored.
+
+```sh
+./build/debug/bin/motionbricks-demo \
+  -listen 0.0.0.0:8080 \
+  -library ./build/debug/libmotionbricks.so \
+  -model ./generated/g1-f32 \
+  -styles ./generated/styles \
+  -device vulkan \
+  -kimodo-dir ../kimodo.cpp/demo-output
+```
+
+`MOTIONBRICKS_KIMODO_DIR` is the equivalent environment variable. The GLBs
+remain external runtime inputs and are not copied into this repository.
+
+You can also use **Upload animation GLB** in the control pane without configuring
+`-kimodo-dir`. It accepts Kimodo G1 (`g1skel34`) skeleton-animation GLBs at 30 FPS,
+up to 16 MiB and 10 minutes. Other skeletons/mesh-only GLBs are rejected; this
+does not perform retargeting. A validated upload is selected automatically;
+press Play to start it. Uploads survive page refresh but are held in bounded
+server memory and cleared on restart. Original local files are not modified.
+
+The initial stitching policy is deliberately bounded and deterministic:
+
+- starting a clip advances the MotionBricks context to the visible frame,
+  aligns the clip's first root position and heading to that pose, and prepends
+  an eight-frame smooth quaternion/root blend;
+- every authored source frame then plays exactly once and cannot be
+  interrupted; the server rejects normal plan requests while the browser
+  disables movement, style, jump, and clip controls;
+- a visible progress bar measures the authored sequence, excluding the short
+  entry blend;
+- on completion, the final four aligned Kimodo frames replace the agent's
+  context. The next plan restores the pre-clip style, world-space movement and
+  facing, using MotionBricks' normal first-four-frame context blend. Walking
+  therefore continues instead of becoming stationary. Space/Escape or tapping
+  the active pad direction stops it; new directional input replaces it.
+
+This first pass does not feed arbitrary Kimodo poses into the model as target
+keyframes. The controller currently exposes locomotion/style targets, and
+earlier out-of-distribution full-pose target experiments were unstable. Using
+the opening pose for an explicit transition and the closing frames for the
+supported context handoff keeps the seam inspectable while preserving the
+complete authored animation.
+
 Open `http://127.0.0.1:8080/`. Hold physical W/A/S/D keys to move relative to
 the current camera yaw, or tap an on-screen direction to latch the same
 camera-relative control; tap the active pad direction again to stop.
@@ -51,6 +98,20 @@ pose. **Overlay all four consecutive poses** reveals the complete constraint
 window. These are adjacent 30 FPS constraint frames rather than four distant
 waypoints, so their exact world positions are intentionally close together.
 
+Press **Jump** or `J` to request one ordinary MotionBricks transition with a
+temporary 5.0 m/s target speed. This uses the current movement direction, or
+the facing direction when stationary. The higher speed makes the existing
+spring controller place the selected style's four standard keyframes farther
+away with a higher implied root velocity. It does not impose a vertical arc,
+switch styles, supply custom poses, or post-process the generated root.
+The complete one-shot transition plays before ordinary locomotion resumes;
+the normal 16-frame walking replan must not cut off its airborne phase.
+In the fixed CPU walking regression, this produces about 16 cm of both-foot
+clearance (versus 1 cm at 2 m/s), peaking at frame 22. This is a short generated
+hop, not a guaranteed high jump for every style or input pose. The regression
+checks actual FK foot clearance, and the browser test checks that the jump
+survives frame 16 and returns to normal planning afterwards.
+
 `-device` accepts `cpu`, `vulkan`, or `auto`. The server deliberately binds to
 localhost by default. Model inference is serialized while sessions keep
 independent agent/context state.
@@ -58,7 +119,11 @@ independent agent/context state.
 ## Runtime shape
 
 The browser creates a session, receives a 30 FPS animation chunk, and asks for
-a replacement chunk when controls change or playback approaches the end.
+a replacement chunk when controls change or after every 16 played frames while
+movement remains requested (about 0.53 seconds). This matches the default
+upstream interactive-controller cadence and keeps a moving character on a
+receding horizon instead of letting it reach and slow at the end of each target
+trajectory.
 Each request contains movement, facing, style, seed, and the number of frames
 already consumed. The Go server advances that session's native agent and
 returns owned animation data and target constraints as JSON:
@@ -68,6 +133,11 @@ returns owned animation data and target constraints as JSON:
 - placed target roots: `[4, 3]`;
 - placed target local rotations: `[4, 34, 4]`, XYZW;
 - G1 joint names, parent indices, and neutral positions from the loaded model.
+
+After every inference the native controller applies upstream's default seam
+filter to the first four frames: generated contributions of 0.3, 0.4333333,
+0.5666667, and 0.7 for root translation and the 29 physical joint coordinates.
+Generated root orientation is retained, matching upstream MuJoCo qpos behavior.
 
 The native target data is captured after style-frame sampling, spring-based
 world placement, and heading correction. The ghosts therefore visualize the
@@ -170,6 +240,40 @@ MOTIONBRICKS_CHROME="$(command -v chromium)" \
 CGO_ENABLED=0 go test -v ./...
 ```
 
+### Observational motion QA
+
+Changes that affect skeleton decoding, root placement, context, blending, clip
+alignment, or controller cadence must also run the observational motion QA:
+
+```sh
+nix develop -c ./scripts/run_motion_qa.sh ../kimodo.cpp/demo-output
+```
+
+The default run selects the shortest compatible G1 sequence. Set
+`MOTIONBRICKS_MOTION_QA_CLIP` to a relative clip ID such as
+`6cef070244b9d11e`, and `MOTIONBRICKS_MOTION_QA_DEVICE` to `cpu` or `vulkan`,
+to exercise a particular sequence/backend. Artifacts go to
+`generated/motion-qa` unless a second script argument supplies another output
+directory.
+
+The headless browser pauses and samples exact frames at the entry start,
+middle, and boundary; throughout the authored sequence; and at the first,
+last blended, and settled exit frames. Every snapshot records the root, all 34
+local XYZW rotations, all 34 rendered world-joint positions, playback state,
+and a PNG. The JSON report also scans every frame for:
+
+- non-finite values and quaternion norm drift;
+- root displacement, speed, acceleration, and total excursion;
+- per-joint angular steps and rendered world-space joint speed;
+- entry bounds derived from the original MotionBricks and Kimodo components;
+- absolute anti-teleport/limb-explosion limits and strict entry/exit seam
+  limits.
+
+This is a regression gate, not a baseline generator: a failed limit should be
+investigated visually and numerically rather than relaxed to match a newly
+broken output. Keep the report and screenshots together when reviewing a
+motion-affecting change.
+
 Without the native asset environment variables, the parser test still runs
 and the native/browser integration cases are skipped.
 
@@ -177,7 +281,6 @@ and the native/browser integration cases are skipped.
 
 - G1 is the only skeleton supported by the released model.
 - The viewer intentionally shows a bone skeleton, not a skinned avatar.
-- HTTP JSON carries whole planned chunks; binary streaming and client-side
-  overlap blending are future work.
+- HTTP JSON carries whole planned chunks; binary streaming is future work.
 - Sessions are in-memory and intended for a trusted local demo, not an
   internet-facing multi-user service.

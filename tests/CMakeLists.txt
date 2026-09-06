@@ -18,6 +18,21 @@ add_executable(motionbricks-plan-parity-format-test
 target_include_directories(motionbricks-plan-parity-format-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
 add_test(NAME motionbricks-plan-parity-format COMMAND motionbricks-plan-parity-format-test)
 
+add_executable(motionbricks-context-endpoints-test context_endpoints_test.cpp)
+target_include_directories(motionbricks-context-endpoints-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(motionbricks-context-endpoints-test PRIVATE motionbricks_static)
+add_test(NAME motionbricks-context-endpoints COMMAND motionbricks-context-endpoints-test)
+
+add_executable(motionbricks-agent-blend-test agent_blend_test.cpp)
+target_include_directories(motionbricks-agent-blend-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(motionbricks-agent-blend-test PRIVATE motionbricks_static)
+if(EXISTS "${PROJECT_SOURCE_DIR}/generated/context-blend.mbblend")
+    add_test(NAME motionbricks-agent-blend COMMAND motionbricks-agent-blend-test
+        "${PROJECT_SOURCE_DIR}/generated/context-blend.mbblend")
+else()
+    add_test(NAME motionbricks-agent-blend COMMAND motionbricks-agent-blend-test)
+endif()
+
 set(MOTIONBRICKS_REFERENCE_FIXTURES "${PROJECT_SOURCE_DIR}/generated/fixtures-gguf" CACHE PATH
     "Optional local GGUF reference fixtures for parity tests")
 if(MOTIONBRICKS_ENABLE_GGML AND
@@ -191,6 +206,8 @@ if(MOTIONBRICKS_SANITIZE)
             motionbricks-cpp-wrapper-test
             motionbricks-session-replay-test
             motionbricks-plan-parity-format-test
+            motionbricks-context-endpoints-test
+            motionbricks-agent-blend-test
             motionbricks-pose-parity-test
             motionbricks-decoder-parity-test
             motionbricks-root-parity-test

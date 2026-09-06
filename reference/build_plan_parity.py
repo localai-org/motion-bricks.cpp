@@ -164,6 +164,7 @@ def target_to_world(
 def build(
     capture: Path, upstream: Path, support: Path, output: Path,
     expected_replay: Path | None = None,
+    playback_blend: bool = False,
 ) -> None:
     if output.exists():
         raise FileExistsError(f"refusing to overwrite parity directory: {output}")
@@ -221,6 +222,27 @@ def build(
             np.asarray(tensors["canonical_first_frame_position"][0], dtype=np.float32),
             float(tensors["canonical_first_frame_heading_angle"][0]), parents, neutral,
         )
+        if playback_blend:
+            if expected_replay is not None:
+                raise ValueError(
+                    "--playback-blend requires the capture's own model output; "
+                    "a replay has no corresponding upstream filtered qpos"
+                )
+            # qpos is the public result after upstream FILTER_QPOS. Preserve the
+            # unblended 34-joint result everywhere except the values that the
+            # filter can represent: first-four root translations and 29
+            # physical hinge-joint rotations. Root orientation and the four
+            # virtual endpoints are deliberately not filtered upstream.
+            blended_roots, blended_local = qpos_to_motion(
+                np.asarray(tensors["qpos"][0, :4], dtype=np.float32),
+                model, data, parents, neutral,
+            )
+            expected_roots[:4] = blended_roots
+            physical = MOTION_JOINT_INDICES[1:]
+            expected_local[:4, physical] = blended_local[:, physical]
+            expected_positions = forward_kinematics(
+                expected_roots, expected_local, parents, neutral
+            )
         target_roots, target_local, target_positions = target_to_world(tensors, parents, neutral)
         move_mujoco = np.asarray(playback["movement_direction"][frame], dtype=np.float32)
         face_mujoco = np.asarray(playback["facing_direction"][frame], dtype=np.float32)
@@ -257,7 +279,12 @@ def build(
             "output_root", "output_local_rotation", "output_fk_joint",
         ],
         "pose_token_ids": "not exposed by the accepted observational boundary",
-        "playback_blend": "excluded; expected output comes from unblended model_features",
+        "playback_blend": (
+            "included for the first four root translations and 29 physical joints; "
+            "expected values come from recorded upstream filtered qpos"
+            if playback_blend else
+            "excluded; expected output comes from unblended model_features"
+        ),
     }
     (output / "manifest.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -271,10 +298,12 @@ def main() -> None:
     parser.add_argument("--support", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-replay", type=Path)
+    parser.add_argument("--playback-blend", action="store_true")
     args = parser.parse_args()
     build(args.capture.resolve(), args.upstream_root.resolve(), args.support.resolve(),
           args.output.resolve(),
-          args.expected_replay.resolve() if args.expected_replay is not None else None)
+          args.expected_replay.resolve() if args.expected_replay is not None else None,
+          args.playback_blend)
 
 
 if __name__ == "__main__":

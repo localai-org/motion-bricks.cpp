@@ -3,11 +3,13 @@
 #include "handles.hpp"
 #include "motion_rep.hpp"
 #include "planner.hpp"
+#include "transition_debug.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 
 namespace motionbricks::detail {
 namespace {
@@ -85,6 +87,39 @@ std::array<float, 4> matrix_xyzw(const mat3 & matrix) {
     const float norm = std::sqrt(wxyz[0]*wxyz[0]+wxyz[1]*wxyz[1]+wxyz[2]*wxyz[2]+wxyz[3]*wxyz[3]);
     for (float & value : wxyz) value /= norm;
     return {wxyz[1],wxyz[2],wxyz[3],wxyz[0]};
+}
+
+std::array<float, 4> slerp(const float * from, const float * to, float amount) {
+    std::array<float, 4> right{to[0],to[1],to[2],to[3]};
+    float dot=from[0]*right[0]+from[1]*right[1]+from[2]*right[2]+from[3]*right[3];
+    if(dot<0.0F) {
+        dot=-dot;
+        for(float & value:right)value=-value;
+    }
+    dot=std::clamp(dot,-1.0F,1.0F);
+    std::array<float,4> result{};
+    if(dot>0.9995F) {
+        for(std::uint32_t axis=0;axis<4U;++axis)
+            result[axis]=from[axis]+amount*(right[axis]-from[axis]);
+    } else {
+        const float angle=std::acos(dot);
+        const float denominator=std::sin(angle);
+        const float left_weight=std::sin((1.0F-amount)*angle)/denominator;
+        const float right_weight=std::sin(amount*angle)/denominator;
+        for(std::uint32_t axis=0;axis<4U;++axis)
+            result[axis]=left_weight*from[axis]+right_weight*right[axis];
+    }
+    const float norm=std::sqrt(result[0]*result[0]+result[1]*result[1]+
+                               result[2]*result[2]+result[3]*result[3]);
+    for(float & value:result)value/=norm;
+    return result;
+}
+
+bool physical_g1_joint(std::uint32_t joint) {
+    // MotionBricks' 34-joint skeleton adds four virtual hand/toe endpoints to
+    // the root plus 29 MuJoCo bodies. Upstream's qpos filter only touches the
+    // physical hinge coordinates (qpos[7:]).
+    return joint!=0U && joint!=7U && joint!=14U && joint!=25U && joint!=33U;
 }
 
 float wrap(float value) {
@@ -315,6 +350,33 @@ mb_status build_constraints(mb_agent & agent, const mb_command & command,
 
 } // namespace
 
+void apply_context_blend(const mb_agent & agent, mb_motion & motion) {
+    if(motion.frames<boundary_frame_count || agent.context_frames<boundary_frame_count ||
+       motion.root_translations.size()<boundary_frame_count*3U ||
+       motion.local_rotations_xyzw.size()<boundary_frame_count*g1_joint_count*4U)
+        return;
+    const auto context_begin=agent.context_frames-boundary_frame_count;
+    constexpr std::array<float,4> generated_weights{
+        0.3F,0.433333337F,0.566666663F,0.7F
+    };
+    for(std::uint32_t frame=0;frame<boundary_frame_count;++frame) {
+        const float weight=generated_weights[frame];
+        const float * context_root=agent.context_root_xyz.data()+(context_begin+frame)*3U;
+        float * generated_root=motion.root_translations.data()+frame*3U;
+        for(std::uint32_t axis=0;axis<3U;++axis)
+            generated_root[axis]=context_root[axis]*(1.0F-weight)+generated_root[axis]*weight;
+        for(std::uint32_t joint=1U;joint<g1_joint_count;++joint) {
+            if(!physical_g1_joint(joint))continue;
+            const float * context_rotation=agent.context_local_rotations_xyzw.data()+
+                ((context_begin+frame)*g1_joint_count+joint)*4U;
+            float * generated_rotation=motion.local_rotations_xyzw.data()+
+                (frame*g1_joint_count+joint)*4U;
+            const auto blended=slerp(context_rotation,generated_rotation,weight);
+            std::copy(blended.begin(),blended.end(),generated_rotation);
+        }
+    }
+}
+
 mb_status seed_agent_from_style(mb_agent & agent, const mb_style & style,
                                 std::string & reason) {
     if (agent.model == nullptr || style.frames < 4U) {
@@ -367,10 +429,14 @@ mb_status plan_agent_impl(mb_agent & agent, const mb_command & command,
     }
     mb_agent canonical_agent;
     mb_command canonical_command;
-    const auto frame=canonicalize(agent,command,canonical_agent,canonical_command);
+    const auto canonical_frame=canonicalize(agent,command,canonical_agent,canonical_command);
     transition_constraints constraints;
     auto status = build_constraints(canonical_agent, canonical_command, *style, constraints, reason);
     if (status != MB_OK) return status;
+    const char * debug_directory=std::getenv("MOTIONBRICKS_TRANSITION_TRACE_DIR");
+    const bool debug=debug_directory && *debug_directory;
+    transition_trace local_trace;
+    if (debug && trace==nullptr) trace=&local_trace;
     status = run_transition(*agent.model, constraints, output, nullptr, trace, reason);
     if (status != MB_OK) return status;
     output.target_frames = 4U;
@@ -378,7 +444,11 @@ mb_status plan_agent_impl(mb_agent & agent, const mb_command & command,
                                            constraints.target_root_translations.end());
     output.target_local_rotations_xyzw.assign(constraints.target_local_rotations_xyzw.begin(),
                                               constraints.target_local_rotations_xyzw.end());
-    restore_world(output,frame);
+    const auto decoded_roots=debug?output.root_translations:std::vector<float>{};
+    restore_world(output,canonical_frame);
+    const auto world_roots=debug?output.root_translations:std::vector<float>{};
+    if(command.skip_context_blend==0U)apply_context_blend(agent,output);
+    if(debug)write_transition_debug(debug_directory,agent,canonical_agent,*trace,decoded_roots,world_roots,output);
     return MB_OK;
 }
 

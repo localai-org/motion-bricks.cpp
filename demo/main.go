@@ -27,6 +27,8 @@ import (
 	mb "github.com/localai/motion-bricks.cpp/bindings/go"
 )
 
+var errKimodoActive = errors.New("a non-interruptible Kimodo animation is playing")
+
 //go:embed web/* web/vendor/*
 var webFiles embed.FS
 
@@ -39,18 +41,23 @@ type session struct {
 	mu      sync.Mutex
 	agent   *mb.Agent
 	planned bool
+	kimodo  *mb.Motion
 }
 
 type demoServer struct {
-	library  *mb.Library
-	model    *mb.Model
-	styles   map[string]*mb.Style
-	ordered  []styleInfo
-	joints   []mb.Joint
-	planMu   sync.Mutex
-	mu       sync.Mutex
-	sessions map[string]*session
-	static   http.Handler
+	library     *mb.Library
+	model       *mb.Model
+	styles      map[string]*mb.Style
+	ordered     []styleInfo
+	joints      []mb.Joint
+	kimodo      map[string]*kimodoClip
+	clips       []kimodoClipInfo
+	planMu      sync.Mutex
+	uploadMu    sync.Mutex
+	uploadBytes int
+	mu          sync.Mutex
+	sessions    map[string]*session
+	static      http.Handler
 }
 
 type replayMetadata struct {
@@ -114,6 +121,26 @@ type planResponse struct {
 	Motion  *mb.Motion    `json:"motion"`
 	Targets *mb.Keyframes `json:"targets"`
 }
+type kimodoStartRequest struct {
+	Session          string     `json:"session"`
+	Clip             string     `json:"clip"`
+	Advance          uint32     `json:"advance"`
+	CurrentRoot      [3]float32 `json:"current_root"`
+	CurrentRotations []float32  `json:"current_rotations"`
+}
+type kimodoStartResponse struct {
+	Session     string         `json:"session"`
+	Clip        kimodoClipInfo `json:"clip"`
+	EntryFrames uint32         `json:"entry_frames"`
+	Motion      *mb.Motion     `json:"motion"`
+}
+type kimodoFinishRequest struct {
+	Session string     `json:"session"`
+	Style   string     `json:"style"`
+	Facing  [2]float32 `json:"facing"`
+	Move    [2]float32 `json:"move"`
+	Seed    uint64     `json:"seed"`
+}
 
 func parseDevice(value string) (mb.Device, error) {
 	switch strings.ToLower(value) {
@@ -153,7 +180,7 @@ func loadDemoServer(libraryPath, modelPath, styleDirectory string, device mb.Dev
 		return nil, fmt.Errorf("no .mbstyle files in %s", styleDirectory)
 	}
 	sort.Strings(paths)
-	server := &demoServer{library: library, model: model, styles: make(map[string]*mb.Style), sessions: make(map[string]*session)}
+	server := &demoServer{library: library, model: model, styles: make(map[string]*mb.Style), sessions: make(map[string]*session), kimodo: make(map[string]*kimodoClip)}
 	for _, path := range paths {
 		style, loadErr := model.LoadStyle(path)
 		if loadErr != nil {
@@ -181,6 +208,15 @@ func loadDemoServer(libraryPath, modelPath, styleDirectory string, device mb.Dev
 	}
 	server.static = static
 	return server, nil
+}
+
+func (s *demoServer) loadKimodo(directory string) error {
+	clips, ordered, err := loadKimodoDirectory(directory, s.joints)
+	if err != nil {
+		return err
+	}
+	s.kimodo, s.clips = clips, ordered
+	return nil
 }
 
 func loadReplayServer(path string) (*replayServer, error) {
@@ -350,6 +386,9 @@ func (s *demoServer) commandPlan(item *session, style *mb.Style, request planReq
 	}
 	item.mu.Lock()
 	defer item.mu.Unlock()
+	if item.kimodo != nil {
+		return nil, errKimodoActive
+	}
 	if item.planned && request.Advance > 0 {
 		if err := item.agent.Advance(request.Advance); err != nil {
 			return nil, err
@@ -395,10 +434,16 @@ func (s *demoServer) routes() http.Handler {
 		jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, _ *http.Request) {
-		jsonResponse(w, http.StatusOK, map[string]any{"fps": 30, "joints": s.joints, "styles": s.ordered})
+		s.mu.Lock()
+		clips := append([]kimodoClipInfo(nil), s.clips...)
+		s.mu.Unlock()
+		jsonResponse(w, http.StatusOK, map[string]any{"fps": 30, "joints": s.joints, "styles": s.ordered, "kimodo_clips": clips})
 	})
+	mux.HandleFunc("POST /api/kimodo/upload", s.uploadKimodo)
 	mux.HandleFunc("POST /api/session", s.createSession)
 	mux.HandleFunc("POST /api/plan", s.plan)
+	mux.HandleFunc("POST /api/kimodo/start", s.startKimodo)
+	mux.HandleFunc("POST /api/kimodo/finish", s.finishKimodo)
 	mux.Handle("/", s.static)
 	return securityHeaders(mux)
 }
@@ -515,10 +560,107 @@ func (s *demoServer) plan(w http.ResponseWriter, r *http.Request) {
 	}
 	motion, err := s.commandPlan(item, style, request)
 	if err != nil {
+		if errors.Is(err, errKimodoActive) {
+			apiError(w, http.StatusConflict, err)
+			return
+		}
 		apiError(w, http.StatusInternalServerError, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, planResponse{Session: request.Session, Style: style.Name, Motion: motion, Targets: motion.Targets})
+}
+
+func (s *demoServer) startKimodo(w http.ResponseWriter, r *http.Request) {
+	var request kimodoStartRequest
+	if err := decodeJSON(r, &request); err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.mu.Lock()
+	item := s.sessions[request.Session]
+	clip := s.kimodo[request.Clip]
+	s.mu.Unlock()
+	if item == nil {
+		apiError(w, http.StatusNotFound, errors.New("unknown session"))
+		return
+	}
+	if clip == nil {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("unknown Kimodo clip %q", request.Clip))
+		return
+	}
+	item.mu.Lock()
+	defer item.mu.Unlock()
+	if item.kimodo != nil {
+		apiError(w, http.StatusConflict, errors.New("a Kimodo animation is already playing"))
+		return
+	}
+	if len(request.CurrentRotations) != kimodoJointCount*4 || !finite(request.CurrentRoot[:]...) || !finite(request.CurrentRotations...) {
+		apiError(w, http.StatusBadRequest, errors.New("current G1 pose is invalid"))
+		return
+	}
+	if item.planned && request.Advance > 0 {
+		if err := item.agent.Advance(request.Advance); err != nil {
+			apiError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	motion, err := alignKimodoClip(clip, request.CurrentRoot, request.CurrentRotations)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	item.kimodo = motion
+	jsonResponse(w, http.StatusOK, kimodoStartResponse{Session: request.Session, Clip: clip.Info,
+		EntryFrames: kimodoEntryFrames, Motion: motion})
+}
+
+func (s *demoServer) finishKimodo(w http.ResponseWriter, r *http.Request) {
+	var request kimodoFinishRequest
+	if err := decodeJSON(r, &request); err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.mu.Lock()
+	item := s.sessions[request.Session]
+	s.mu.Unlock()
+	if item == nil {
+		apiError(w, http.StatusNotFound, errors.New("unknown session"))
+		return
+	}
+	style, err := s.style(request.Style)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !finite(request.Move[0], request.Move[1], request.Facing[0], request.Facing[1]) || math.Hypot(float64(request.Facing[0]), float64(request.Facing[1])) < 1e-6 {
+		apiError(w, http.StatusBadRequest, errors.New("facing vector is invalid"))
+		return
+	}
+	item.mu.Lock()
+	if item.kimodo == nil {
+		item.mu.Unlock()
+		apiError(w, http.StatusConflict, errors.New("no Kimodo animation is playing"))
+		return
+	}
+	motion := item.kimodo
+	first := int(motion.Frames-4) * 3
+	firstRotation := int(motion.Frames-4) * kimodoJointCount * 4
+	err = item.agent.SetContext(motion.Roots[first:], motion.Rotations[firstRotation:], 4)
+	if err == nil {
+		item.kimodo = nil
+		item.planned = false
+	}
+	item.mu.Unlock()
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, err)
+		return
+	}
+	planned, err := s.commandPlan(item, style, planRequest{Move: request.Move, Facing: request.Facing, Seed: request.Seed})
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, err)
+		return
+	}
+	jsonResponse(w, http.StatusOK, planResponse{Session: request.Session, Style: style.Name, Motion: planned, Targets: planned.Targets})
 }
 
 func main() {
@@ -526,6 +668,7 @@ func main() {
 	libraryPath := flag.String("library", os.Getenv("MOTIONBRICKS_LIB"), "path to libmotionbricks")
 	modelPath := flag.String("model", os.Getenv("MOTIONBRICKS_MODEL"), "model bundle directory")
 	stylesPath := flag.String("styles", os.Getenv("MOTIONBRICKS_STYLES"), "style directory")
+	kimodoPath := flag.String("kimodo-dir", os.Getenv("MOTIONBRICKS_KIMODO_DIR"), "directory containing Kimodo G1 animation.glb files")
 	replayPath := flag.String("replay", os.Getenv("MOTIONBRICKS_REPLAY"), "portable .mbreplay session (disables native planning)")
 	comparisonPath := flag.String("comparison", os.Getenv("MOTIONBRICKS_COMPARISON"), "open-loop parity report JSON (disables native planning)")
 	deviceName := flag.String("device", "cpu", "auto, cpu, or vulkan")
@@ -557,6 +700,13 @@ func main() {
 		demo, err := loadDemoServer(*libraryPath, *modelPath, *stylesPath, device)
 		if err != nil {
 			log.Fatal(err)
+		}
+		if err = demo.loadKimodo(*kimodoPath); err != nil {
+			demo.Close()
+			log.Fatal(err)
+		}
+		if len(demo.clips) > 0 {
+			log.Printf("loaded %d Kimodo G1 animations", len(demo.clips))
 		}
 		handler = demo.routes()
 		closeDemo = demo.Close
