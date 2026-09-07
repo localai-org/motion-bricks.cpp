@@ -23,6 +23,10 @@ void check_collision_geometry(mb_physics * physics,const char * scene,const floa
     assert(mb_physics_trace(physics,4,state.data(),state.size(),&n,error,sizeof(error))==MB_OK && n==65);
     assert(mb_physics_trace(physics,5,trace.data(),trace.size(),&n,error,sizeof(error))==MB_OK && n==348);
     mjModel * model=mj_loadXML(scene,nullptr,error,sizeof(error));assert(model);
+#if mjVERSION_HEADER == 3012000
+    model->opt.enableflags |= mjENBL_SLEEP;
+    for(int tree=0;tree<model->ntree;++tree) model->tree_sleep_policy[tree]=mjSLEEP_NEVER;
+#endif
     mjData * data=mj_makeData(model);assert(data);model->opt.timestep=.005;
     data->qpos[0]=roots[2];data->qpos[1]=roots[0];data->qpos[2]=roots[1];
     std::copy_n(state.data()+58,4,data->qpos+3);
@@ -57,8 +61,16 @@ void check_collision_geometry(mb_physics * physics,const char * scene,const floa
     };
     compare(before);
     for(int step=0;step<4;++step) {
-        mju_zero(data->ctrl,model->nu);
-        for(int j=0;j<29;++j)data->ctrl[j<22?j:j+7]=trace[step*87+58+j];
+        std::fill_n(data->ctrl,model->nu,0.0);
+        for(int j=0;j<29;++j) {
+            const int actuator=j<22?j:j+7;
+#if mjVERSION_HEADER == 3012000
+            assert(model->actuator_ctrlnum[actuator]==1);
+            data->ctrl[model->actuator_ctrladr[actuator]]=trace[step*87+58+j];
+#else
+            data->ctrl[actuator]=trace[step*87+58+j];
+#endif
+        }
         mj_step(model,data);
     }
     compare(after);assert(maximum<2e-6);
@@ -76,6 +88,21 @@ void check_collision_geometry(mb_physics * physics,const char * scene,const floa
             assert(mb_physics_collision_triangles(physics,i,vertices.data(),n-1,&n,error,sizeof(error))==MB_INVALID_ARGUMENT);
             assert(mb_physics_collision_triangles(physics,i,vertices.data(),vertices.size(),&n,error,sizeof(error))==MB_OK);
             for(float v:vertices)assert(std::isfinite(v));++meshes;
+            // Independently check outward hull winding against an interior
+            // point, without assuming polygon boundaries are planar/convex.
+            const int mesh=model->geom_dataid[geoms[i]];
+            double center[3]{};
+            for(int v=0;v<model->mesh_vertnum[mesh];++v)
+                for(int axis=0;axis<3;++axis)
+                    center[axis]+=model->mesh_vert[3*(model->mesh_vertadr[mesh]+v)+axis]/double(model->mesh_vertnum[mesh]);
+            double volume6=0;
+            for(size_t cursor=0;cursor<vertices.size();cursor+=9) {
+                const float * a=vertices.data()+cursor,*b=a+3,*c=a+6;
+                double u[3],v[3];for(int axis=0;axis<3;++axis){u[axis]=b[axis]-double(a[axis]);v[axis]=c[axis]-double(a[axis]);}
+                const double outward=(u[1]*v[2]-u[2]*v[1])*(a[0]-center[0])+(u[2]*v[0]-u[0]*v[2])*(a[1]-center[1])+(u[0]*v[1]-u[1]*v[0])*(a[2]-center[2]);
+                assert(outward>=-1e-10);volume6+=outward;
+            }
+            assert(volume6>0);
         }else assert(n==0);
         assert(mb_physics_collision_shape(physics,count,&type,size,3,name,sizeof(name),error,sizeof(error))==MB_INVALID_ARGUMENT);
     }

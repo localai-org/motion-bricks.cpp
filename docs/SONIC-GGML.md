@@ -4,7 +4,9 @@ The original released **GEAR-SONIC G1 mode-0** policy now runs in native C++
 on GGML CPU and Vulkan. Its encoder, FSQ32 tokens, decoder and composed actions
 are checked against the pinned official ONNX, not against another GGML run.
 There is no ONNX Runtime, TensorRT, DDS or Python inference dependency in the
-demo. Optional native **MuJoCo 3.3.5** supplies simulation, not inference.
+demo. Optional native **MuJoCo 3.12.0** supplies simulation, not inference.
+The upstream Docker reference remains pinned to 3.3.5; see the
+[upgrade notes and verification](MUJOCO-UPGRADE.md).
 
 ## Scope and parity
 
@@ -33,7 +35,8 @@ TensorRT tokens exactly; decoder differences are below 6.68e-6. F32 matrix
 multiplication is explicitly requested. FSQ uses ONNX ties-to-even rounding
 and preserves the exported F32 subtract/add sequence.
 
-Neural parity is separate from closed-loop tracking. `check_native_sonic.py`
+Neural parity is separate from closed-loop tracking. The baseline figures below
+were captured with MuJoCo 3.3.5. `check_native_sonic.py`
 independently rebuilds the reference from the upstream-validated Python
 converter, then checks the **actual native** observation/history buffers,
 same-state ONNX tokens/actions, motor targets, clipped PD torques and reference
@@ -51,12 +54,15 @@ nor does passing neural parity guarantee successful physical tracking.
 ## Build and prepare assets
 
 Use the normal Linux build instructions first. For physics, install the native
-MuJoCo 3.3.5 SDK and enable the optional build:
+MuJoCo 3.12.0 SDK and enable the optional build. The helper downloads the official
+Linux x86-64/AArch64 release and checks its SHA-256:
 
 ```sh
+bash scripts/download_mujoco.sh
+MUJOCO_SDK="$PWD/generated/sonic/mujoco-3.12.0"
 cmake --preset debug -DMOTIONBRICKS_ENABLE_PHYSICS=ON \
   -DMUJOCO_INCLUDE_DIR="$MUJOCO_SDK/include" \
-  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.3.3.5"
+  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.3.12.0"
 cmake --build --preset debug
 (cd demo && CGO_ENABLED=0 go build -o ../build/debug/bin/motionbricks-demo .)
 ```

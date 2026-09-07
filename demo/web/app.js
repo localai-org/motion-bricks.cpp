@@ -1400,7 +1400,7 @@ async function installStream() {
       state.rig.boneMaterial.color.setHex(s.physics?0x65a9ff:0x55efc4);state.rig.jointMaterial.color.setHex(s.physics?0xaacaff:0xd9fff3);state.rig.setOpacity(s.physics?.65:1);
       document.querySelector('.legend span:first-child').lastChild.textContent=s.physics?'Generated reference':'Animated model';
       if(message.error)info.textContent=`${message.error}. Disable Live physics to continue the reference animation, or Reset session to start over.`;
-      else info.textContent=`WebSocket · ${s.physics?'GGML SONIC + MuJoCo':'kinematic reference'} · ${message.paused?'paused':'50 Hz server stream'} · ${client.buffer.underruns} playback underruns${message.fallen?' · Fall detected; physics continues':''}`;
+      else info.textContent=`WebSocket · ${s.physics?`GGML SONIC + MuJoCo ${capability.mujoco_version??''}`:'kinematic reference'} · ${message.paused?'paused':'50 Hz server stream'} · ${client.buffer.underruns} playback underruns${message.fallen?' · Fall detected; physics continues':''}`;
     }
   });
   toggle.addEventListener('change',()=>client.send('physics',{enabled:toggle.checked}));

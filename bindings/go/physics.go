@@ -33,6 +33,7 @@ type Physics struct {
 	collisionTransforms func(uintptr, unsafe.Pointer, uint64, unsafe.Pointer, uint64) uint32
 	collisionShapes     []CollisionShape
 	collisionShapesID   string
+	engineVersion       string
 }
 type CollisionShape struct {
 	Type     uint32    `json:"type"`
@@ -44,6 +45,7 @@ type CollisionShape struct {
 
 // CollisionShapes returns immutable compiled collision geometry for this model.
 func (p *Physics) CollisionShapes() []CollisionShape { return p.collisionShapes }
+func (p *Physics) EngineVersion() string             { return p.engineVersion }
 func (p *Physics) CollisionShapesID() string         { return p.collisionShapesID }
 
 type PhysicalFrame struct {
@@ -74,11 +76,13 @@ func OpenPhysics(library, model, scene, config string, device Device) (*Physics,
 		return nil, err
 	}
 	var load func(unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	var engineVersion func(unsafe.Pointer, uint64, unsafe.Pointer, uint64) uint32
 	for _, entry := range []struct {
 		name   string
 		target any
 	}{
 		{"mb_sonic_load", &load}, {"mb_sonic_free", &p.sonicFree}, {"mb_physics_create", &p.create}, {"mb_physics_free", &p.free}, {"mb_physics_reset", &p.reset},
+		{"mb_physics_engine_version", &engineVersion},
 		{"mb_physics_start", &p.start}, {"mb_physics_step", &p.step}, {"mb_physics_skeleton", &p.skeleton}, {"mb_physics_status", &p.status},
 		{"mb_physics_collision_count", &p.collisionCount}, {"mb_physics_collision_shape", &p.collisionShape},
 		{"mb_physics_collision_triangles", &p.collisionTriangles}, {"mb_physics_collision_transforms", &p.collisionTransforms},
@@ -90,6 +94,16 @@ func OpenPhysics(library, model, scene, config string, device Device) (*Physics,
 		purego.RegisterFunc(entry.target, address)
 	}
 	buffer := make([]byte, errorBufferSize)
+	version := make([]byte, 32)
+	if err = l.check("MuJoCo version", engineVersion(unsafe.Pointer(&version[0]), uint64(len(version)), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+		return nil, err
+	}
+	for _, b := range version {
+		if b == 0 {
+			break
+		}
+		p.engineVersion += string(b)
+	}
 	var options uintptr
 	if err = l.check("options", l.optionsCreate(unsafe.Pointer(&options), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err

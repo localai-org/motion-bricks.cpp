@@ -14,6 +14,8 @@
 #include <vector>
 #if defined(MOTIONBRICKS_HAVE_MUJOCO)
 #include <mujoco/mujoco.h>
+static_assert(mjVERSION_HEADER == 335 || mjVERSION_HEADER == 3012000,
+              "Validated MuJoCo SDKs: 3.3.5 reference or 3.12.0 runtime");
 #endif
 using motionbricks::detail::guard;
 using motionbricks::detail::fail;
@@ -29,7 +31,7 @@ constexpr std::array<const char *,29> names{
  "right_shoulder_pitch_joint","right_shoulder_roll_joint","right_shoulder_yaw_joint","right_elbow_joint","right_wrist_roll_joint","right_wrist_pitch_joint","right_wrist_yaw_joint"};
 struct ModelDelete {void operator()(mjModel * p) const {mj_deleteModel(p);}};
 struct DataDelete {void operator()(mjData * p) const {mj_deleteData(p);}};
-struct Joint {uint32_t native{}; std::array<double,17> values{}; int q{},v{},actuator{},body{};};
+struct Joint {uint32_t native{}; std::array<double,17> values{}; int q{},v{},actuator{},control{},body{};};
 using Pose=std::array<double,36>;
 struct History {std::array<float,3> angular{},gravity{}; std::array<float,29> q{},dq{},action{};};
 bool valid_pose(const float * roots,uint64_t nr,const float * rotations,uint64_t nq) {
@@ -91,7 +93,8 @@ struct mb_physics {
         mj_kinematics(model.get(),d);
     }
     void positions(mjData * d,float * out) {
-        mj_kinematics(model.get(),d);
+        // start/step/set_pose maintain fresh FK; copying positions does not
+        // need another full kinematics pass (nor does collision export).
         for(size_t j=0;j<30;++j) {
             const auto * p=d->xpos+3*bodies[j]; out[3*j]=float(p[1]);out[3*j+1]=float(p[2]);out[3*j+2]=float(p[0]);
         }
@@ -142,11 +145,11 @@ struct mb_physics {
         for(int step=0;step<4;++step) {
             for(const auto & j:joints) trace[5].push_back(data->qpos[j.q]);
             for(const auto & j:joints) trace[5].push_back(data->qvel[j.v]);
-            mju_zero(data->ctrl,model->nu);
+            std::fill_n(data->ctrl,model->nu,0.0);
             for(size_t j=0;j<29;++j) {
                 const auto & c=joints[j]; double tau=c.values[14]*(target[j]-data->qpos[c.q])-c.values[15]*data->qvel[c.v];
-                data->ctrl[c.actuator]=std::clamp(tau,-c.values[16],c.values[16]);
-                trace[5].push_back(data->ctrl[c.actuator]);
+                data->ctrl[c.control]=std::clamp(tau,-c.values[16],c.values[16]);
+                trace[5].push_back(data->ctrl[c.control]);
             }
             mj_step(model.get(),data.get());
             if(data->warning[mjWARN_BADQPOS].number || data->warning[mjWARN_BADQVEL].number ||
@@ -165,11 +168,28 @@ struct mb_physics {};
 #endif
 
 extern "C" {
+mb_status mb_physics_engine_version(char * version,uint64_t capacity,char * error,uint64_t cap) {
+    if(version && capacity) version[0]=0;
+    return guard(error,cap,[&]()->mb_status {
+        if(!version || !capacity) return fail(MB_INVALID_ARGUMENT,error,cap,"version buffer required");
+#if defined(MOTIONBRICKS_HAVE_MUJOCO)
+        if(mj_version()!=mjVERSION_HEADER) return fail(MB_INCOMPATIBLE_MODEL,error,cap,"MuJoCo runtime/header ABI mismatch");
+        const char * value=mj_versionString();
+        if(std::strlen(value)+1>capacity) return fail(MB_INVALID_ARGUMENT,error,cap,"version buffer too small");
+        std::memcpy(version,value,std::strlen(value)+1);return MB_OK;
+#else
+        return fail(MB_BACKEND_UNAVAILABLE,error,cap,"MuJoCo unavailable");
+#endif
+    });
+}
 mb_status mb_physics_create(mb_sonic * sonic,const char * scene,const char * config,mb_physics ** output,char * error,uint64_t cap) {
     if(output) *output=nullptr;
     return guard(error,cap,[&]()->mb_status {
         if(!sonic || !scene || !config || !output) return fail(MB_INVALID_ARGUMENT,error,cap,"physics model/scene/config/output required");
 #if defined(MOTIONBRICKS_HAVE_MUJOCO)
+        // Reject mismatched libraries before allocating/accessing ABI-dependent
+        // mjModel/mjData structures. Modern version codes use a different scale.
+        if(mj_version()!=mjVERSION_HEADER) return fail(MB_INCOMPATIBLE_MODEL,error,cap,"MuJoCo runtime/header ABI mismatch");
         auto s=std::make_unique<mb_physics>();s->sonic=sonic;
         std::ifstream f(config,std::ios::binary);char magic[8]{};f.read(magic,8);
         if(!f || std::memcmp(magic,"MBSPHY01",8)) return fail(MB_INVALID_FORMAT,error,cap,"invalid physical config header");
@@ -195,7 +215,15 @@ mb_status mb_physics_create(mb_sonic * sonic,const char * scene,const char * con
         char message[1024]{};s->model.reset(mj_loadXML(scene,nullptr,message,sizeof(message)));
         if(!s->model) return fail(MB_INVALID_FORMAT,error,cap,message);
         auto * m=s->model.get();
-        if(m->nq!=50 || m->nv!=49 || m->nu!=43 || mj_version()!=335) return fail(MB_INVALID_FORMAT,error,cap,"requires original 43-actuator G1 and MuJoCo 3.3.5");
+        if(m->nq!=50 || m->nv!=49 || m->nu!=43) return fail(MB_INVALID_FORMAT,error,cap,"requires original 43-control G1");
+#if mjVERSION_HEADER == 3012000
+        if(m->nactuator!=43) return fail(MB_INVALID_FORMAT,error,cap,"requires original 43-actuator G1");
+        // Keep active motor trees awake. Sleeping still avoids static geometry
+        // work; it must be enabled before mjData initialization. Never suspend
+        // SONIC/controller ticks merely because the robot is idle or fallen.
+        if(m->opt.integrator!=mjINT_RK4) m->opt.enableflags |= mjENBL_SLEEP;
+        for(int tree=0;tree<m->ntree;++tree) m->tree_sleep_policy[tree]=mjSLEEP_NEVER;
+#endif
         for(int g=0;g<m->ngeom;++g) {
             bool enabled=m->geom_contype[g] || m->geom_conaffinity[g];
             for(int p=0;p<m->npair;++p) enabled=enabled || m->pair_geom1[p]==g || m->pair_geom2[p]==g;
@@ -207,8 +235,19 @@ mb_status mb_physics_create(mb_sonic * sonic,const char * scene,const char * con
             auto & j=s->joints[k];int id=mj_name2id(m,mjOBJ_JOINT,names[k]);
             if(id<0 || m->jnt_type[id]!=mjJNT_HINGE) return fail(MB_INVALID_FORMAT,error,cap,"missing G1 hinge");
             j.q=m->jnt_qposadr[id];j.v=m->jnt_dofadr[id];j.body=m->jnt_bodyid[id];j.actuator=-1;
-            for(int a=0;a<m->nu;++a) if(m->actuator_trnid[a*2]==id) j.actuator=a;
+#if mjVERSION_HEADER == 3012000
+            for(int a=0;a<m->nactuator;++a) if(m->actuator_trntype[a]==mjTRN_JOINT && m->actuator_trnid[a*2]==id) j.actuator=a;
+#else
+            for(int a=0;a<m->nu;++a) if(m->actuator_trntype[a]==mjTRN_JOINT && m->actuator_trnid[a*2]==id) j.actuator=a;
+#endif
             if(j.actuator<0) return fail(MB_INVALID_FORMAT,error,cap,"missing G1 actuator");
+#if mjVERSION_HEADER == 3012000
+            if(m->actuator_ctrlnum[j.actuator]!=1) return fail(MB_INVALID_FORMAT,error,cap,"G1 motor must have one scalar control");
+            j.control=m->actuator_ctrladr[j.actuator];
+            if(j.control<0 || j.control>=m->nu) return fail(MB_INVALID_FORMAT,error,cap,"invalid G1 motor control address");
+#else
+            j.control=j.actuator;
+#endif
         }
         s->bodies[0]=mj_name2id(m,mjOBJ_BODY,"pelvis");
         for(size_t i=0;i<29;++i) s->bodies[i+1]=s->joints[static_cast<size_t>(to_isaac[i])].body;
@@ -262,6 +301,7 @@ mb_status mb_physics_step(mb_physics * s,const float * roots,uint64_t nr,const f
 #if defined(MOTIONBRICKS_HAVE_MUJOCO)
         if(!s->started || !valid_pose(roots,nr,rot,nq)) return fail(MB_INVALID_ARGUMENT,error,cap,"session not started or invalid reference pose");
         s->tick(roots,rot,frames,t);
+        mj_kinematics(s->model.get(),s->data.get());
         s->positions(s->data.get(),actual);s->set_pose(s->reference.get(),s->sample(roots,rot,frames,t+.02));s->positions(s->reference.get(),reference);return MB_OK;
 #else
         return fail(MB_BACKEND_UNAVAILABLE,error,cap,"MuJoCo unavailable");
@@ -330,8 +370,11 @@ mb_status mb_physics_collision_triangles(mb_physics * s,uint32_t index,float * x
         if(base+2>static_cast<uint64_t>(m->nmeshgraph)) return fail(MB_INVALID_FORMAT,error,cap,"invalid convex graph header");
         const int nv=m->mesh_graph[base],nf=m->mesh_graph[base+1];
         if(nv<0 || nf<0) return fail(MB_INVALID_FORMAT,error,cap,"invalid convex graph sizes");
-        // Packed hull-face layout follows MuJoCo 3.3.5 mjr_uploadMesh:
+        // Exact hull-face layout follows mjr_uploadMesh in BOTH validated SDKs:
         // https://github.com/google-deepmind/mujoco/blob/3.3.5/src/render/render_context.c
+        // https://github.com/google-deepmind/mujoco/blob/3.12.0/src/render/classic/render_context.c
+        // Do not fan-triangulate mesh_polyvert: MuJoCo groups approximately
+        // coplanar faces, whose boundaries need not be convex planar polygons.
         const uint64_t faces=base+2+3ULL*static_cast<uint64_t>(nv)+3ULL*static_cast<uint64_t>(nf);
         if(faces+3ULL*static_cast<uint64_t>(nf)>static_cast<uint64_t>(m->nmeshgraph)) return fail(MB_INVALID_FORMAT,error,cap,"invalid convex graph faces");
         *count=9ULL*static_cast<uint64_t>(nf);
@@ -353,7 +396,6 @@ mb_status mb_physics_collision_transforms(mb_physics * s,float * transforms,uint
         if(!s || (!transforms && count)) return fail(MB_INVALID_ARGUMENT,error,cap,"collision transform output required");
 #if defined(MOTIONBRICKS_HAVE_MUJOCO)
         if(!s->started || count!=s->collision_geoms.size()*7) return fail(MB_INVALID_ARGUMENT,error,cap,"collision transform shape/session invalid");
-        mj_kinematics(s->model.get(),s->data.get());
         for(size_t i=0;i<s->collision_geoms.size();++i) {
             const int g=s->collision_geoms[i];const auto * p=s->data->geom_xpos+3*g;const auto * r=s->data->geom_xmat+9*g;
             double basis[9],q[4];

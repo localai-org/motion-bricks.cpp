@@ -14,6 +14,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t * bytes,size_t size) {
         if(path && mb_sonic_load(path,nullptr,&result,e,sizeof(e))!=MB_OK){std::fprintf(stderr,"%s\n",e);std::abort();}return result;}();
     if(size<4)return 0;
     std::array<float,1762> input{};std::array<float,64> output{};char error[64]{};
+    char version[32]{};mb_physics_engine_version(bytes[0]&1?version:nullptr,bytes[1]%33,error,sizeof(error));
     std::memcpy(input.data(),bytes+4,std::min(size-4,input.size()*sizeof(float)));
     input[0]=bytes[0]%3;
     if(bytes[1]&1) mb_sonic_encode(model,input.data(),bytes[2]&1?1762:bytes[2],output.data(),bytes[3]&1?64:bytes[3],error,sizeof(error));

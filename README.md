@@ -12,7 +12,8 @@ and pose-token decisions in the reference suite.
 The demo also offers optional native MuJoCo physics driven by **GGML SONIC**,
 including Kimodo animation playback, with target/reference/physical skeletons.
 The original G1 mode-0 policy passes independent CPU/Vulkan layer parity.
-See [SONIC setup, results and limitations](docs/SONIC-GGML.md).
+See [SONIC setup, results and limitations](docs/SONIC-GGML.md) and the
+[MuJoCo 3.12 upgrade notes](docs/MUJOCO-UPGRADE.md).
 The browser sends WebSocket commands and renders buffered server-owned motion;
 see [streaming and client QA](docs/STREAMING.md).
 

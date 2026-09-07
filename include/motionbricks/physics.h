@@ -5,6 +5,11 @@
 extern "C" {
 #endif
 typedef struct mb_physics mb_physics;
+/* Linked engine version (e.g. "3.12.0"), copied into a caller-owned buffer.
+   No model/session required. Disabled builds return BACKEND_UNAVAILABLE;
+   mismatched compile/runtime SDKs return INCOMPATIBLE_MODEL. */
+MB_API mb_status mb_physics_engine_version(char * version, uint64_t version_capacity,
+    char * error, uint64_t error_capacity);
 /* Simulation only. SONIC must outlive the session. Each session owns its
    MuJoCo data/history. Caller serializes session calls and destruction.
    No struct layouts cross this ABI. Disabled builds return UNAVAILABLE. */

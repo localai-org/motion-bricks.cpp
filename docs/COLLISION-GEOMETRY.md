@@ -12,7 +12,11 @@ foot-sole boxes. World/floor geoms and visual-only geoms are excluded. Contact
 margins are not expanded into additional surfaces.
 
 Mesh faces use MuJoCo's compiled convex graph, following the layout used by
-[MuJoCo 3.3.5's own convex-hull renderer](https://github.com/google-deepmind/mujoco/blob/3.3.5/src/render/render_context.c#L271).
+[MuJoCo 3.12.0's own convex-hull renderer](https://github.com/google-deepmind/mujoco/blob/3.12.0/src/render/classic/render_context.c#L347)
+(the same layout is used in the retained 3.3.5 reference build). We deliberately
+do not fan-triangulate `mesh_polyvert`: its approximately coplanar grouped
+boundaries need not be convex planar polygons, so a fan can overlap or reverse
+triangles. An independent interior-point check verifies exported hull winding.
 Triangles are losslessly indexed before transmission; no simplification or
 skeleton-based approximation is applied. Shapes are sent at connection setup
 and identified by a content hash so reconnecting does not rebuild unchanged

@@ -142,7 +142,11 @@ func (h *streamHub) Close() { h.cancel(); <-h.done; h.workers.Wait() }
 func (h *streamHub) routes(next http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, 200, map[string]any{"available": true, "version": 1, "physics": h.physics != nil})
+		engine := ""
+		if h.physics != nil {
+			engine = h.physics.EngineVersion()
+		}
+		jsonResponse(w, 200, map[string]any{"available": true, "version": 1, "physics": h.physics != nil, "mujoco_version": engine})
 	})
 	mux.HandleFunc("GET /api/stream/socket", h.socket)
 	mux.HandleFunc("POST /api/live-physics", func(w http.ResponseWriter, r *http.Request) {

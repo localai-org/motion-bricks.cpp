@@ -9,6 +9,14 @@ void check_collision_geometry(mb_physics *,const char *,const float *,const floa
 #endif
 int main(int argc,char ** argv) {
     char error[64]{};mb_sonic * model=nullptr;
+    char version[32]{};
+    assert(mb_physics_engine_version(nullptr,0,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    const auto version_status=mb_physics_engine_version(version,sizeof(version),error,sizeof(error));
+    assert(version_status==MB_OK || version_status==MB_BACKEND_UNAVAILABLE);
+    if(version_status==MB_OK) {
+        std::cout<<"MuJoCo "<<version<<'\n';
+        assert(mb_physics_engine_version(version,1,error,sizeof(error))==MB_INVALID_ARGUMENT && version[0]==0);
+    }
     assert(mb_sonic_load(nullptr,nullptr,&model,error,sizeof(error))==MB_INVALID_ARGUMENT && !model);
     std::array<float,1762> enc{};std::array<float,994> dec{};std::array<float,64> tokens{};std::array<float,29> actions{};
     assert(mb_sonic_encode(nullptr,enc.data(),1762,tokens.data(),64,error,sizeof(error))==MB_INVALID_ARGUMENT);

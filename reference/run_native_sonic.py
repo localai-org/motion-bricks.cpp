@@ -22,6 +22,15 @@ def main():
     args=p.parse_args()
     if args.output.exists(): p.error('output exists')
     lib=c.CDLL(str(args.library.resolve())); error=c.create_string_buffer(1024)
+    # Record the loaded engine, including old libraries without the new C API.
+    # This optional diagnostic symbol is not needed by non-physics consumers.
+    engine_version=None
+    try:
+        version_fn=lib.mj_versionString
+        version_fn.argtypes=[];version_fn.restype=c.c_char_p
+        engine_version=version_fn().decode('ascii')
+    except AttributeError:
+        pass
     signatures={'mb_runtime_options_create':[c.POINTER(c.c_void_p),c.c_void_p,c.c_uint64],
                 'mb_runtime_options_set_device':[c.c_void_p,c.c_uint32,c.c_void_p,c.c_uint64],
                 'mb_runtime_options_set_threads':[c.c_void_p,c.c_uint32,c.c_void_p,c.c_uint64],
@@ -67,7 +76,7 @@ def main():
     def digest(path):
         with Path(path).open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
     inputs={name:dict(path=str(getattr(args,name)),sha256=digest(getattr(args,name))) for name in ['library','model','scene','config','motion']}
-    args.output.write_text(json.dumps(dict(schema=1,device=args.device,failure=failure,elapsed_seconds=elapsed,inputs=inputs,rows=rows)))
+    args.output.write_text(json.dumps(dict(schema=1,device=args.device,mujoco_version=engine_version,failure=failure,elapsed_seconds=elapsed,inputs=inputs,rows=rows)))
     print(json.dumps(dict(samples=len(rows),sim_seconds=rows[-1]['time'],wall_seconds=elapsed,failure=failure)))
     if failure: raise SystemExit(1)
 
