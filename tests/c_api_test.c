@@ -32,6 +32,13 @@ int main(void) {
 
     assert(mb_command_create(&command, error, sizeof(error)) == MB_OK);
     assert(command != 0);
+    uint32_t sampling_argmax = 99;
+    assert(mb_command_get_sampling_argmax(command, &sampling_argmax, error, sizeof(error)) == MB_OK && sampling_argmax == 0);
+    assert(mb_command_set_sampling_argmax(command, 1, error, sizeof(error)) == MB_OK);
+    assert(mb_command_set_sampling_argmax(command, 2, error, sizeof(error)) == MB_INVALID_ARGUMENT);
+    assert(mb_command_get_sampling_argmax(command, &sampling_argmax, error, sizeof(error)) == MB_OK && sampling_argmax == 1);
+    assert(mb_command_set_sampling_argmax(0, 0, error, sizeof(error)) == MB_INVALID_ARGUMENT);
+    assert(mb_command_get_sampling_argmax(command, 0, error, sizeof(error)) == MB_INVALID_ARGUMENT);
     float x = 0.0F, y = 0.0F, z = 0.0F, speed = 0.0F, heading = 0.0F;
     uint32_t enabled = UINT32_MAX;
     uint64_t seed = UINT64_MAX;

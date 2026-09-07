@@ -91,9 +91,15 @@ against 14 captured pre/post-filter transitions: root values match exactly and
 the worst sign-invariant physical-joint quaternion component error is
 4.33e-7 (0.000050 degrees).
 
+Gumbel sampling is now the default (one pose pass, temperature 1), with explicit
+argmax diagnostics, stored-uniform upstream fixtures, and sampling/API sanitizer
+fuzzing. The camera uses a frame-rate-independent damped pelvis anchor for both
+its position and look-at, preserved across transitions. See
+[sampling validation](SAMPLING.md) and [demo controls](DEMO.md).
+
 Still outstanding from the wider plan are direct Kimodo GLB style import,
-Gumbel sampling, graph/buffer caching and performance work, binary browser
-streaming, fuzzing, and optimized weight formats. The human-led
+graph/buffer caching and performance work, binary browser
+streaming, broader parser/API fuzzing, and optimized weight formats. The human-led
 `motions-bricks.md` remains unchanged.
 
 ## System shape
@@ -436,7 +442,8 @@ The pose graph combines masked multi-head VQ code embeddings, predicted root
 features, sparse pose constraints, duration embedding, and position embedding;
 runs the 16-layer transformer; and produces per-head code logits. One sampling
 iteration is the released demo default. Argmax is supported for deterministic
-diagnostics; production Gumbel sampling uses an agent-local PRNG and seed.
+diagnostics; production Gumbel sampling uses a private per-plan PRNG reset from
+the command seed (no shared/global random state).
 Reference fixtures store the random uniforms/Gumbel values explicitly instead
 of assuming PyTorch and C++ generators produce identical streams.
 

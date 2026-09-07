@@ -17,6 +17,7 @@ func TestJumpFootClearance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer demo.Close()
+	demo.samplingArgmax = true // Fixed argmax regression; stochastic hops can vary.
 	for _, speed := range []float32{2, 5} {
 		agent, err := demo.model.NewAgent()
 		if err != nil {

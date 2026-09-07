@@ -6,9 +6,7 @@ Don't modify this unless instructed.
 
 - where is the C API documentation
 - Are low-level functions exposed so things like styles can be handle externally? could someone just use it for inference?
-- the camera jerks or shakes when we reach a corner or a transition
 - What is the difference between our context and upstreams?
-- Gumbel sampling
 
 # End goal
 

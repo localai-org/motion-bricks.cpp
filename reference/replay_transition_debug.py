@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay diagnostic root/decoder inputs through upstream; endpoint ablations only.
+"""Replay root/pose/decoder boundaries, shared-uniform sampling and endpoint ablations.
 
 This does not change native inference or assert complete handoff parity. The
 decoder ablation deliberately holds tokens and root conditioning fixed.
@@ -11,10 +11,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
 from generate_fixtures import SAFE_HASHES, UPSTREAM_REVISION, make_motion_rep, state, verify
+from replay_pose_trace import POSE_ARGS
 
 
 ROOT_ARGS = {
@@ -58,11 +60,13 @@ def main():
         raise ValueError("unexpected upstream revision")
     subprocess.run(["git", "-C", str(args.upstream_root), "diff", "--exit-code", "HEAD",
                     "--", "motionbricks/motionbricks"], check=True)
-    for component in ("root", "vqvae"):
+    for component in ("root", "pose", "vqvae"):
         verify(args.safe_directory / f"{component}.safetensors", SAFE_HASHES[component])
     sys.path.insert(0, str(args.upstream_root / "motionbricks"))
     from motionbricks.motion_backbone.neural_modules.root_backbone import root_backbone_network
     from motionbricks.vqvae.neural_modules.encdec_double_cond import DoubleCondDecoder
+    from motionbricks.motion_backbone.neural_modules.pose_backbone import pose_backbone_network
+    from motionbricks.motion_backbone.models.sampling import gumbel_sample
 
     torch.set_num_threads(4)
     document = json.loads(args.trace.read_text())
@@ -108,6 +112,37 @@ def main():
                 torch.tensor([[count]], dtype=torch.int64))["pred_global_root_values"][:, :frames]
             report[label] = comparison(result, tensor("root.pred_global_root_values", (1, frames, 5)))
     del root
+    pose = pose_backbone_network(make_motion_rep(), POSE_ARGS).eval()
+    pose.load_state_dict(state(args.safe_directory / "pose.safetensors", "backbone_net."), strict=True)
+    with torch.inference_mode():
+        logits = pose(torch.full((1, count, 8), 10, dtype=torch.int64),
+                      tensor("pose.root_condition", (1, frames, 4)),
+                      tensor("pose.pose_condition", (1, frames, 304)),
+                      tensor("pose.has_pose_condition", (1, frames), torch.bool),
+                      torch.tensor([[count]], dtype=torch.int64))["pose_logits"][:, :count]
+        report["pose_replay"] = comparison(logits, tensor("pose.logits", logits.shape))
+        if data.get("pose.sampling_uniforms"):
+            uniforms = tensor("pose.sampling_uniforms", logits.shape)
+            def supplied(value, *_args, **_kwargs):
+                return value.copy_(uniforms)
+            with patch.object(torch.Tensor, "uniform_", supplied):
+                tokens = gumbel_sample(logits, temperature=1.0)
+            expected_tokens = tensor("pose.tokens", tokens.shape, torch.int64)
+            report["gumbel_shared_uniforms"] = {
+                "tokens": tokens.numel(), "mismatches": int((tokens != expected_tokens).sum()),
+                "uniform_source": "captured native draws, not assumed equal seeded RNGs"}
+            if not torch.equal(tokens, expected_tokens):
+                raise AssertionError(f"upstream Gumbel tokens differ: {report['gumbel_shared_uniforms']}")
+        else:
+            tokens = logits.argmax(-1)
+            report["argmax_token_mismatches"] = int((tokens != tensor("pose.tokens", (1, count, 8), torch.int64)).sum())
+    del pose
+    codebook = state(args.safe_directory / "vqvae.safetensors", "pose_net.",
+                     lambda name: name == "pose_net.quantizer.vq._codebook.embed")["quantizer.vq._codebook.embed"]
+    quantized = codebook[torch.arange(8)[None, None, :], tokens].reshape(1, count, 256).transpose(1, 2).contiguous()
+    report["sampled_codebook_max_abs"] = float((quantized - tensor("decoder.quantized", quantized.shape)).abs().max())
+    if data.get("pose.sampling_uniforms") and report["sampled_codebook_max_abs"] != 0:
+        raise AssertionError("sampled codebook differs from captured decoder input")
     decoder = DoubleCondDecoder(
         input_emb_width=413, output_emb_width=256, down_t=2, width=512, depth=4,
         dilation_growth_rate=3, activation="relu", norm="None",
@@ -118,7 +153,7 @@ def main():
         for label, target in (("decoder_replay", condition),
                               ("decoder_endpoint_identity_fixed_other_inputs", endpoints_identity(condition))):
             result = decoder(
-                tensor("decoder.quantized", (1, 256, count)),
+                quantized if data.get("pose.sampling_uniforms") else tensor("decoder.quantized", (1, 256, count)),
                 external_cond=tensor("decoder.external_condition", (1, frames, 2)),
                 target_cond=target,
                 has_target_cond=tensor("decoder.has_target_condition", (1, frames), torch.bool),

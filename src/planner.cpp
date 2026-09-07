@@ -5,6 +5,7 @@
 #include "neural_runtime.hpp"
 #include "pose.hpp"
 #include "root.hpp"
+#include "sampling.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -28,7 +29,7 @@ mb_status run_transition(const mb_model & model,
                          mb_motion & output,
                          std::uint32_t * selected_tokens,
                          transition_trace * trace,
-                         std::string & reason) {
+                         std::string & reason, std::uint64_t seed, bool sampling_argmax) {
     if (!model.runtime || model.motion_mean.size() != 418U || model.motion_std.size() != 418U) {
         reason = "model is missing neural or normalization data";
         return MB_INCOMPATIBLE_MODEL;
@@ -159,11 +160,14 @@ mb_status run_transition(const mb_model & model,
                               has_pose_condition, tokens, tokens, logits, reason);
     if (status != MB_OK) return status;
     finish_stage(1U);
-    for (std::size_t item = 0; item < pose_tokens.size(); ++item) {
-        const auto begin = logits.begin() + static_cast<std::ptrdiff_t>(item * 10U);
-        pose_tokens[item] = static_cast<std::int32_t>(std::max_element(begin, begin + 10) - begin);
+    std::vector<float> uniforms;
+    if (!sampling_argmax) {
+        uniforms.resize(logits.size());
+        for (float & value : uniforms) value = sampling_uniform(seed);
     }
+    if (!sample_pose_tokens(logits, uniforms, 10U, pose_tokens, reason)) return MB_INVALID_ARGUMENT;
     if (trace != nullptr) {
+        trace->sampling_uniforms = uniforms;
         trace->pose_logits = logits;
         trace->pose_tokens = pose_tokens;
     }

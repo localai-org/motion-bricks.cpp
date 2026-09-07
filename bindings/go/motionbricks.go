@@ -23,44 +23,45 @@ const (
 const errorBufferSize = 1024
 
 type Library struct {
-	handle                uintptr
-	abiVersion            func() uint32
-	statusString          func(uint32) uintptr
-	optionsCreate         func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	optionsFree           func(uintptr)
-	optionsSetDevice      func(uintptr, uint32, unsafe.Pointer, uint64) uint32
-	modelLoad             func(unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	modelFree             func(uintptr)
-	modelJointCount       func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	modelJointName        func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	modelJointParent      func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	modelNeutralPosition  func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	styleLoad             func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	styleFree             func(uintptr)
-	styleName             func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	styleSpeed            func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	agentCreate           func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	agentFree             func(uintptr)
-	agentReset            func(uintptr, uintptr, unsafe.Pointer, uint64) uint32
-	agentSetContext       func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64, uint64, unsafe.Pointer, uint64) uint32
-	agentPlan             func(uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	agentAdvance          func(uintptr, uint32, unsafe.Pointer, uint64) uint32
-	commandCreate         func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	commandFree           func(uintptr)
-	commandSetStyle       func(uintptr, uintptr, unsafe.Pointer, uint64) uint32
-	commandSetMovement    func(uintptr, float32, float32, float32, unsafe.Pointer, uint64) uint32
-	commandSetFacing      func(uintptr, float32, float32, float32, unsafe.Pointer, uint64) uint32
-	commandSetSpeed       func(uintptr, float32, unsafe.Pointer, uint64) uint32
-	commandSetWorldTarget func(uintptr, float32, float32, float32, float32, uint32, unsafe.Pointer, uint64) uint32
-	commandSetSeed        func(uintptr, uint64, unsafe.Pointer, uint64) uint32
-	motionFree            func(uintptr)
-	motionFrames          func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionJoints          func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionRoots           func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionRotations       func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionTargetFrames    func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionTargetRoots     func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
-	motionTargetRotations func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	handle                   uintptr
+	abiVersion               func() uint32
+	statusString             func(uint32) uintptr
+	optionsCreate            func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	optionsFree              func(uintptr)
+	optionsSetDevice         func(uintptr, uint32, unsafe.Pointer, uint64) uint32
+	modelLoad                func(unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	modelFree                func(uintptr)
+	modelJointCount          func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	modelJointName           func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	modelJointParent         func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	modelNeutralPosition     func(uintptr, uint32, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	styleLoad                func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	styleFree                func(uintptr)
+	styleName                func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	styleSpeed               func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	agentCreate              func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	agentFree                func(uintptr)
+	agentReset               func(uintptr, uintptr, unsafe.Pointer, uint64) uint32
+	agentSetContext          func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64, uint64, unsafe.Pointer, uint64) uint32
+	agentPlan                func(uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	agentAdvance             func(uintptr, uint32, unsafe.Pointer, uint64) uint32
+	commandCreate            func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	commandFree              func(uintptr)
+	commandSetStyle          func(uintptr, uintptr, unsafe.Pointer, uint64) uint32
+	commandSetMovement       func(uintptr, float32, float32, float32, unsafe.Pointer, uint64) uint32
+	commandSetFacing         func(uintptr, float32, float32, float32, unsafe.Pointer, uint64) uint32
+	commandSetSpeed          func(uintptr, float32, unsafe.Pointer, uint64) uint32
+	commandSetSamplingArgmax func(uintptr, uint32, unsafe.Pointer, uint64) uint32
+	commandSetWorldTarget    func(uintptr, float32, float32, float32, float32, uint32, unsafe.Pointer, uint64) uint32
+	commandSetSeed           func(uintptr, uint64, unsafe.Pointer, uint64) uint32
+	motionFree               func(uintptr)
+	motionFrames             func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionJoints             func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionRoots              func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionRotations          func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionTargetFrames       func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionTargetRoots        func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	motionTargetRotations    func(uintptr, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint64) uint32
 }
 
 func Open(path string) (*Library, error) {
@@ -97,6 +98,7 @@ func Open(path string) (*Library, error) {
 	register(&library.commandSetMovement, "mb_command_set_movement_direction")
 	register(&library.commandSetFacing, "mb_command_set_facing_direction")
 	register(&library.commandSetSpeed, "mb_command_set_target_speed")
+	register(&library.commandSetSamplingArgmax, "mb_command_set_sampling_argmax")
 	register(&library.commandSetWorldTarget, "mb_command_set_world_target")
 	register(&library.commandSetSeed, "mb_command_set_seed")
 	register(&library.motionFree, "mb_motion_free")
@@ -355,6 +357,17 @@ func (c *Command) SetSpeed(speed float32) error {
 func (c *Command) SetSeed(seed uint64) error {
 	buffer := make([]byte, errorBufferSize)
 	return c.library.check("set seed", c.library.commandSetSeed(c.handle, seed, errorPointer(buffer), uint64(len(buffer))), buffer)
+}
+
+// SetSamplingArgmax selects deterministic diagnostics; false (the default)
+// uses upstream-style temperature-1 Gumbel sampling with the command seed.
+func (c *Command) SetSamplingArgmax(enabled bool) error {
+	var flag uint32
+	if enabled {
+		flag = 1
+	}
+	buffer := make([]byte, errorBufferSize)
+	return c.library.check("set sampling", c.library.commandSetSamplingArgmax(c.handle, flag, errorPointer(buffer), uint64(len(buffer))), buffer)
 }
 func (c *Command) SetWorldTarget(x, y, z, heading float32, enabled bool) error {
 	var flag uint32

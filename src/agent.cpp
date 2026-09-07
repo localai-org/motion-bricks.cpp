@@ -437,7 +437,8 @@ mb_status plan_agent_impl(mb_agent & agent, const mb_command & command,
     const bool debug=debug_directory && *debug_directory;
     transition_trace local_trace;
     if (debug && trace==nullptr) trace=&local_trace;
-    status = run_transition(*agent.model, constraints, output, nullptr, trace, reason);
+    status = run_transition(*agent.model, constraints, output, nullptr, trace, reason,
+                            command.seed, command.sampling_argmax != 0U);
     if (status != MB_OK) return status;
     output.target_frames = 4U;
     output.target_root_translations.assign(constraints.target_root_translations.begin(),

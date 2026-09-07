@@ -44,6 +44,7 @@ struct transition_trace {
     std::vector<float> pose_condition;
     std::vector<std::uint8_t> has_pose_condition;
     std::vector<float> pose_logits;
+    std::vector<float> sampling_uniforms;
     std::vector<std::int32_t> pose_tokens;
     std::vector<float> decoder_quantized;
     std::vector<float> decoder_external_condition;
@@ -56,6 +57,6 @@ mb_status run_transition(const mb_model & model,
                          mb_motion & output,
                          std::uint32_t * selected_tokens,
                          transition_trace * trace,
-                         std::string & reason);
+                         std::string & reason, std::uint64_t seed, bool sampling_argmax);
 
 } // namespace motionbricks::detail

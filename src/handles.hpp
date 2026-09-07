@@ -53,6 +53,7 @@ struct mb_command {
     // comparing the raw neural output stored in an open-loop fixture.
     std::uint32_t skip_context_blend = 0;
     std::uint64_t seed = 0;
+    std::uint32_t sampling_argmax = 0;
 };
 
 struct mb_agent {

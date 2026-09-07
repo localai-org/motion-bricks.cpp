@@ -103,6 +103,13 @@ MB_API mb_status mb_command_set_seed(mb_command * value, uint64_t seed,
                                     char * error, uint64_t error_capacity);
 MB_API mb_status mb_command_get_seed(const mb_command * value, uint64_t * output,
                                     char * error, uint64_t error_capacity);
+/* Default 0: upstream Gumbel sampling at temperature 1. Set 1 for diagnostic
+   argmax. Each plan's private RNG is reset from command.seed; equal inputs and
+   seed reproduce the same draws. PyTorch's seeded stream is not identical. */
+MB_API mb_status mb_command_set_sampling_argmax(mb_command * value, uint32_t enabled,
+                                               char * error, uint64_t error_capacity);
+MB_API mb_status mb_command_get_sampling_argmax(const mb_command * value, uint32_t * output,
+                                               char * error, uint64_t error_capacity);
 
 /* Neural model, style, and stateful animation planner. */
 MB_API mb_status mb_model_load(const char * bundle_directory,

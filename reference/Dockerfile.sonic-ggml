@@ -1,0 +1,4 @@
+# Conversion and independent same-state ONNX evaluation only. Native SONIC
+# inference does not link ONNX Runtime or require Python.
+FROM motionbricks-sonic-reference:trt10.9
+RUN python -m pip install --no-cache-dir onnx==1.18.0 onnxruntime==1.22.0

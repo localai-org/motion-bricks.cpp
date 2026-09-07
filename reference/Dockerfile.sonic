@@ -1,0 +1,65 @@
+# Reuse the documented MotionBricks CUDA/MuJoCo reference environment.
+# Build that image with Dockerfile.session first, or supply an equivalent tag.
+ARG REFERENCE_IMAGE=motionbricks-reference-session:torch2.7
+FROM ${REFERENCE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TENSORRT_VERSION=10.9.0.34-1+cuda12.8
+ARG ONNXRUNTIME_VERSION=1.22.0
+RUN apt-get update && apt-get install --no-install-recommends -y \
+      g++ cmake ninja-build curl ca-certificates pkg-config \
+      libeigen3-dev libzmq3-dev libmsgpack-dev libyaml-cpp-dev \
+      libasound2-dev libgtest-dev zlib1g-dev \
+    && curl -fSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+      cuda-cudart-dev-12-8 \
+      libnvinfer-headers-dev=${TENSORRT_VERSION} \
+      libnvinfer-headers-plugin-dev=${TENSORRT_VERSION} \
+      libnvinfer10=${TENSORRT_VERSION} \
+      libnvinfer-plugin10=${TENSORRT_VERSION} \
+      libnvonnxparsers10=${TENSORRT_VERSION} \
+      libnvinfer-dev=${TENSORRT_VERSION} \
+      libnvinfer-plugin-dev=${TENSORRT_VERSION} \
+      libnvonnxparsers-dev=${TENSORRT_VERSION} \
+    && rm -rf /var/lib/apt/lists/* /tmp/cuda-keyring.deb
+
+RUN curl -fSL https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz -o /tmp/onnxruntime.tgz \
+    && mkdir -p /opt/onnxruntime \
+    && tar -xzf /tmp/onnxruntime.tgz --strip-components=1 -C /opt/onnxruntime \
+    && rm /tmp/onnxruntime.tgz
+
+RUN curl -fSL https://github.com/eclipse-cyclonedds/cyclonedds/archive/refs/tags/0.10.2.tar.gz -o /tmp/cyclonedds.tgz \
+    && mkdir /tmp/cyclonedds \
+    && tar -xzf /tmp/cyclonedds.tgz --strip-components=1 -C /tmp/cyclonedds \
+    && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds \
+      -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+    && cmake --build /tmp/cyclonedds/build -j 4 \
+    && cmake --install /tmp/cyclonedds/build \
+    && CYCLONEDDS_HOME=/opt/cyclonedds python -m pip install --no-cache-dir cyclonedds==0.10.2 \
+    && rm -rf /tmp/cyclonedds /tmp/cyclonedds.tgz
+
+# cuda_runtime_api.h includes CRT headers shipped separately from cudart-dev.
+RUN apt-get update && apt-get install --no-install-recommends -y cuda-nvcc-12-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install --no-install-recommends -y nlohmann-json3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unitree calls getpwuid(), so --user must have a real passwd entry.
+ARG SONIC_UID=1000
+ARG SONIC_GID=1000
+RUN (getent group ${SONIC_GID} || groupadd -g ${SONIC_GID} sonic) \
+    && (getent passwd ${SONIC_UID} || useradd -m -u ${SONIC_UID} -g ${SONIC_GID} sonic)
+
+ENV CUDAToolkit_ROOT=/usr/local/cuda-12.8 \
+    TensorRT_ROOT=/usr \
+    onnxruntime_DIR=/opt/onnxruntime \
+    HAS_ROS2=0 \
+    PYTHONPATH=/upstream:/upstream/external_dependencies/unitree_sdk2_python \
+    CYCLONEDDS_HOME=/opt/cyclonedds \
+    LD_LIBRARY_PATH=/opt/cyclonedds/lib:/opt/onnxruntime/lib:/usr/local/cuda-12.8/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+WORKDIR /work
+ENTRYPOINT ["bash"]

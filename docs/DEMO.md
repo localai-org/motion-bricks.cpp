@@ -9,7 +9,16 @@ character. An orange diamond-jointed ghost skeleton identifies a selected
 placed style-pose constraint supplied to the planner; all four constraints can
 be overlaid for inspection.
 
+The native viewer sends commands over WebSocket and interpolates timestamped
+poses from the server-owned simulation. See [streaming and client QA](STREAMING.md)
+for playback buffering, reconnect/ownership and numerical safety checks.
+
 ## Build and run
+
+For optional actuator-driven simulation, enable **Live physics · GGML SONIC**
+after following [the SONIC setup](SONIC-GGML.md). It overlays the physical robot
+and reference, works during Kimodo playback, and keeps physical state across
+plans and clip transitions. Physics remains optional for the kinematic demo.
 
 First build the native project and create the model/style assets described in
 the main README. Then build the Go application:
@@ -97,6 +106,20 @@ view away from the character. The T0–T3 slider selects one fully visible targe
 pose. **Overlay all four consecutive poses** reveals the complete constraint
 window. These are adjacent 30 FPS constraint frames rather than four distant
 waypoints, so their exact world positions are intentionally close together.
+
+Camera following uses a critically damped pelvis anchor rather than the whole
+skeleton's bounding box. Position and look-at share the filtered anchor, so
+arm swings cannot jerk the aim independently of the camera. Vertical movement
+is damped more heavily and capped at 0.8 m/s; horizontal following is capped
+at 6 m/s per axis. Tracking state persists across replans and authored/live
+handoffs. Reset camera explicitly recentres it; this does not alter any
+animation or conceal motion errors in the QA data.
+
+Pose-token sampling now defaults to upstream-style **Gumbel sampling** at
+temperature 1. `-sampling argmax` restores the deterministic diagnostic mode.
+Equal command inputs and seeds reproduce native draws; PyTorch's same integer
+seed is not expected to produce the same random stream. See
+[sampling parity](SAMPLING.md) for shared-noise validation and its limits.
 
 Press **Jump** or `J` to request one ordinary MotionBricks transition with a
 temporary 5.0 m/s target speed. This uses the current movement direction, or

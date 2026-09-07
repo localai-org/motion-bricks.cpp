@@ -66,6 +66,7 @@ inline void write_transition_debug(const char * directory, const mb_agent & agen
         item("pose.pose_condition",trace.pose_condition);
         item("pose.has_pose_condition",trace.has_pose_condition);
         item("pose.logits",trace.pose_logits);item("pose.tokens",trace.pose_tokens);
+        item("pose.sampling_uniforms",trace.sampling_uniforms);
         item("decoder.quantized",trace.decoder_quantized);
         item("decoder.external_condition",trace.decoder_external_condition);
         item("decoder.has_target_condition",trace.decoder_target_mask);

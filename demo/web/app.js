@@ -1,4 +1,7 @@
 import * as THREE from './vendor/three.module.min.js';
+import {CameraFollow} from './camera-follow.js';
+import {StreamClient} from './stream-client.js';
+import {CollisionGeometry} from './collision-geometry.js';
 
 const viewport = document.querySelector('#viewport');
 const styleSelect = document.querySelector('#style-select');
@@ -36,6 +39,9 @@ const state = {
   padKey: '', pending: false, replanQueued: false, seed: 10, style: '', rig: null, targetRigs: [],
   generatedPath: null, targetPath: null,
   replay: null, replayPlaying: true, replayPlan: -2,
+  physics: null, physicsTime: 0,
+  live: null,
+  stream: null,
   comparison: null, comparisonPlan: -1, comparisonShowcase: null,
   comparisonVisiblePlan: -1, nativeRig: null, errorLines: null,
   kimodo: null, jumpActive: false, controlsLocked: false, qaPaused: false,
@@ -173,6 +179,15 @@ class SkeletonRig {
     this.updateGeometry();
   }
 
+  poseInterpolated(roots, rotations, frame, frameCount) {
+    const at=THREE.MathUtils.clamp(frame,0,frameCount-1), first=Math.floor(at),next=Math.min(first+1,frameCount-1),u=at-first;
+    this.bones[0].position.fromArray(roots,first*3).lerp(new THREE.Vector3().fromArray(roots,next*3),u);
+    const q=new THREE.Quaternion();
+    for(let j=0;j<this.bones.length;j++)this.bones[j].quaternion.fromArray(rotations,(first*this.bones.length+j)*4)
+      .slerp(q.fromArray(rotations,(next*this.bones.length+j)*4),u);
+    this.updateGeometry();
+  }
+
   poseWorld(positions, offset = 0) {
     for (let joint = 0; joint < this.jointMeshes.length; joint++) {
       const marker = this.jointMeshes[joint];
@@ -283,18 +298,18 @@ function makeSkeletons(joints) {
   state.targetPath = makeLine(0xff6b3d, true);
 }
 
-function makeComparisonSkeletons(joints) {
+function makeComparisonSkeletons(joints, firstLabel = 'UPSTREAM', secondLabel = 'NATIVE') {
   state.rig = new SkeletonRig(joints, {
     color: 0x55efc4, jointColor: 0xd9fff3, rootColor: 0xffd166,
     emissive: 0x0c5b49, rootEmissive: 0x6a3b00, emissiveIntensity: 0.8,
     radius: 0.018, jointRadius: 0.029, rootRadius: 0.055,
-    opacity: 0.82, diamonds: false, renderOrder: 5, label: 'UPSTREAM', labelColor: '#6fffd0', labelOffset: -0.22,
+    opacity: 0.82, diamonds: false, renderOrder: 5, label: firstLabel, labelColor: '#6fffd0', labelOffset: -0.22,
   });
   state.nativeRig = new SkeletonRig(joints, {
     color: 0x65a9ff, jointColor: 0xd7e8ff, rootColor: 0xff5b8f,
     emissive: 0x173d72, rootEmissive: 0x741536, emissiveIntensity: 0.9,
     radius: 0.014, jointRadius: 0.024, rootRadius: 0.046,
-    opacity: 0.72, diamonds: true, renderOrder: 8, label: 'NATIVE', labelColor: '#7ab6ff', labelOffset: 0.22,
+    opacity: 0.72, diamonds: true, renderOrder: 8, label: secondLabel, labelColor: '#7ab6ff', labelOffset: 0.22,
   });
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(joints.length * 2 * 3), 3));
@@ -328,11 +343,14 @@ function updateTargetVisibility() {
 const cameraView = {yaw: 0.68, pitch: 0.24, distance: 4.8, dragging: false, x: 0, y: 0};
 const focus = new THREE.Vector3();
 const desiredCamera = new THREE.Vector3();
-const visibleBounds = new THREE.Box3();
+const cameraSubject = new THREE.Vector3();
+const cameraFollow = new CameraFollow();
+let cameraFollowTime = performance.now();
 function resetCameraView() {
   cameraView.yaw = 0.68;
   cameraView.pitch = 0.24;
   cameraView.distance = 4.8;
+  cameraFollow.position = null;
   document.documentElement.dataset.cameraYaw = String(cameraView.yaw);
   if (state.keys.size || state.padKey) { updateControl(); schedulePlan(35); }
 }
@@ -537,7 +555,12 @@ function useMotion(response, plannedMove = state.move, playhead = 0, plannedAdva
 }
 
 async function requestPlan(advance = Math.floor(state.playhead), override = null) {
+  if(state.stream){state.stream.client.send('control',{style:state.style,move:[...state.move],facing:[...state.facing]});return null;}
   if (!state.session || state.controlsLocked || state.kimodo) return null;
+  if (state.live?.enabled && (state.live.busy || state.live.queue.length)) {
+    state.live.deferredPlan = {advance: null, override};
+    return null;
+  }
   // Do not discard the airborne part at the normal 16-frame walk cadence.
   if (state.jumpActive && state.playhead < state.motion.frames - 1) return null;
   if (state.pending) {
@@ -569,6 +592,7 @@ async function requestPlan(advance = Math.floor(state.playhead), override = null
 }
 
 async function beginJump() {
+  if(state.stream){state.stream.client.send('jump');return;}
   if (!state.motion || state.pending || state.controlsLocked || state.jumpActive) return;
   const source = Math.hypot(state.move[0], state.move[1]) > 1e-6 ? state.move : state.facing;
   const length = Math.hypot(source[0], source[1]);
@@ -622,7 +646,12 @@ function currentPose() {
 }
 
 async function beginKimodo() {
+  if(state.stream){if(kimodoSelect.value)state.stream.client.send('play_clip',{clip:kimodoSelect.value});return;}
   if (!state.motion || state.pending || state.controlsLocked || state.jumpActive || !kimodoSelect.value) return;
+  if (state.live?.enabled && (state.live.busy || state.live.queue.length)) {
+    state.live.deferredKimodo = true;
+    return;
+  }
   const resume = {move: [...state.move], facing: [...state.facing], style: state.style, padKey: state.padKey};
   clearTimeout(controlTimer);
   state.keys.clear(); state.padKey = ''; state.move = [0, 0]; updateControl();
@@ -739,24 +768,31 @@ showAllTargets.addEventListener('change', updateTargetVisibility);
 targetFrame.addEventListener('input', updateTargetVisibility);
 
 function updateCamera() {
-  visibleBounds.makeEmpty();
-  for (const marker of state.rig.jointMeshes) visibleBounds.expandByPoint(marker.position);
-  visibleBounds.getCenter(focus);
+  // Use the pelvis, not the bounding box: waving an arm must not steer the
+  // camera. Preserve this filter across plans and authored/live transitions.
+  const followedRig=state.stream?.rendered?.physical ? state.stream.rig :
+    (state.live?.enabled && state.live.rig ? state.live.rig : state.rig);
+  cameraSubject.copy(followedRig.jointMeshes[0].position);
+  cameraSubject.y -= 0.12;
+  const now = performance.now();
+  focus.fromArray(cameraFollow.update(cameraSubject.toArray(), (now - cameraFollowTime) / 1000));
+  cameraFollowTime = now;
   const horizontal = Math.cos(cameraView.pitch) * cameraView.distance;
   desiredCamera.set(
     focus.x + Math.sin(cameraView.yaw) * horizontal,
     focus.y + Math.sin(cameraView.pitch) * cameraView.distance,
     focus.z + Math.cos(cameraView.yaw) * horizontal,
   );
-  if (camera.userData.positioned) camera.position.lerp(desiredCamera, 0.12);
-  else { camera.position.copy(desiredCamera); camera.userData.positioned = true; }
+  camera.position.copy(desiredCamera);
   camera.lookAt(focus);
 }
 
 function renderMotion(frame) {
   if (!state.motion) return;
   const index = Math.min(state.motion.frames - 1, Math.max(0, frame));
-  state.rig.pose(state.motion.roots, state.motion.rotations, index, state.motion.frames);
+  if(state.live?.enabled) state.rig.poseInterpolated(state.motion.roots,state.motion.rotations,
+    state.playhead+(state.live.queue.length?Math.min(1,state.live.elapsed/.02)*.6:0),state.motion.frames);
+  else state.rig.pose(state.motion.roots, state.motion.rotations, index, state.motion.frames);
   updateCamera();
 }
 
@@ -776,7 +812,7 @@ function installMotionQAHook() {
     snapshot() {
       if (!state.motion) return null;
       const frame = THREE.MathUtils.clamp(Math.floor(state.playhead), 0, state.motion.frames - 1);
-      renderMotion(frame);
+      if(!state.stream)renderMotion(frame);
       return {
         frame,
         root: state.motion.roots.slice(frame * 3, frame * 3 + 3),
@@ -949,7 +985,18 @@ function animate(now) {
   requestAnimationFrame(animate);
   const delta = state.qaPaused ? 0 : Math.min(0.1, (now - state.lastTime) / 1000);
   state.lastTime = now;
-  if (state.comparison) {
+  if (state.stream) {
+    renderStream(delta);
+  } else if (state.physics) {
+    if (state.replayPlaying) {
+      state.physicsTime = Math.min(state.physics.times.at(-1), state.physicsTime + delta);
+      if (state.physicsTime === state.physics.times.at(-1)) {
+        state.replayPlaying = false;
+        replayToggle.textContent = 'Replay';
+      }
+    }
+    renderPhysics();
+  } else if (state.comparison) {
     const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
       : Math.min(state.comparison.plans[state.comparisonPlan].expected_frames,
         state.comparison.plans[state.comparisonPlan].actual_frames);
@@ -959,7 +1006,8 @@ function animate(now) {
     if (state.replayPlaying) state.playhead = (state.playhead + delta * state.replay.fps) % state.replay.frames;
     renderReplay(Math.floor(state.playhead));
   } else if (state.motion) {
-    state.playhead += delta * state.meta.fps;
+    if (state.live?.enabled) advanceLivePhysics(delta);
+    else state.playhead += delta * state.meta.fps;
     if (state.kimodo) {
       const authoredFrame = state.playhead - state.kimodo.entryFrames;
       const progress = THREE.MathUtils.clamp(authoredFrame / Math.max(1, state.kimodo.clip.frames - 1), 0, 1);
@@ -968,7 +1016,7 @@ function animate(now) {
       kimodoPhase.textContent = authoredFrame < 0 ? 'Blending into Kimodo…'
         : (state.kimodo.finishing ? 'Blending back to MotionBricks…' : 'Kimodo sequence playing');
       document.documentElement.dataset.kimodoProgress = String(progress);
-      if (state.playhead >= state.motion.frames - 1) {
+      if (state.playhead >= state.motion.frames - 1 && !(state.live?.busy || state.live?.queue.length)) {
         state.playhead = state.motion.frames - 1;
         void finishKimodo();
       }
@@ -980,11 +1028,16 @@ function animate(now) {
         void requestPlan(controllerCadenceFrames);
     }
     renderMotion(Math.floor(state.playhead));
+    if (state.live?.enabled) renderLivePhysics();
   }
   renderer.render(scene, camera);
 }
 
 replayToggle.addEventListener('click', () => {
+  if (state.physics && state.physicsTime >= state.physics.times.at(-1)) {
+    state.physicsTime = 0;
+    cameraFollow.position = null; // Explicit replay jump, not a motion transition.
+  }
   state.replayPlaying = !state.replayPlaying;
   replayToggle.textContent = state.replayPlaying ? 'Pause' : 'Play';
   state.lastTime = performance.now();
@@ -993,7 +1046,11 @@ replayFrame.addEventListener('input', () => {
   state.replayPlaying = false;
   replayToggle.textContent = 'Play';
   state.playhead = Number(replayFrame.value);
-  if (state.comparison) renderComparison(Math.floor(state.playhead));
+  if (state.physics) {
+    state.physicsTime = state.physics.times[state.playhead];
+    cameraFollow.position = null; // Scrubbing must immediately frame the selected pose.
+    renderPhysics();
+  } else if (state.comparison) renderComparison(Math.floor(state.playhead));
   else renderReplay(Math.floor(state.playhead));
 });
 
@@ -1029,11 +1086,10 @@ async function selfTest() {
   if (!renderer.domElement.width || state.rig.bones.length !== 34 || visibleTargets !== 1 || !state.targetRigs[3].group.visible) {
     throw new Error('animated and target skeletons were not rendered');
   }
-  const expectedFocus = new THREE.Vector3();
-  const animatedBounds = new THREE.Box3();
-  for (const marker of state.rig.jointMeshes) animatedBounds.expandByPoint(marker.position);
-  animatedBounds.getCenter(expectedFocus);
-  if (focus.distanceTo(expectedFocus) > 1e-6) throw new Error('camera is not anchored to the animated skeleton');
+  const expectedFocus = state.rig.jointMeshes[0].position.clone();
+  expectedFocus.y -= 0.12;
+  if (cameraSubject.distanceTo(expectedFocus) > 1e-6 || !focus.toArray().every(Number.isFinite))
+    throw new Error('camera subject/filter is invalid');
   targetFrame.value = '1';
   updateTargetVisibility();
   if (!state.targetRigs[1].group.visible || state.targetRigs.filter(rig => rig.group.visible).length !== 1) {
@@ -1065,13 +1121,11 @@ async function replaySelfTest() {
   updateTargetVisibility();
   renderer.render(scene, camera);
   const visibleTargets = state.targetRigs.filter(rig => rig.group.visible).length;
-  const expectedFocus = new THREE.Vector3();
-  const animatedBounds = new THREE.Box3();
-  for (const marker of state.rig.jointMeshes) animatedBounds.expandByPoint(marker.position);
-  animatedBounds.getCenter(expectedFocus);
+  const expectedFocus = state.rig.jointMeshes[0].position.clone();
+  expectedFocus.y -= 0.12;
   if (replay.frames !== state.meta.frames || replay.joints !== state.meta.joints ||
       replay.plans !== state.meta.plans || replay.targetFrames !== 4 || visibleTargets !== 4 ||
-      focus.distanceTo(expectedFocus) > 1e-6 || !renderer.domElement.width) {
+      cameraSubject.distanceTo(expectedFocus) > 1e-6 || !focus.toArray().every(Number.isFinite) || !renderer.domElement.width) {
     throw new Error('replay dimensions, targets, or animated-camera anchor are invalid');
   }
   document.documentElement.dataset.replayFrames = String(replay.frames);
@@ -1195,8 +1249,321 @@ async function startComparison() {
   else document.documentElement.dataset.testStatus = 'ready';
 }
 
+function renderPhysics() {
+  const p = state.physics, stride = p.joints.length * 3;
+  let index = 0;
+  while (index + 1 < p.frames && p.times[index + 1] <= state.physicsTime) index++;
+  const next = Math.min(index + 1, p.frames - 1);
+  const blend = next === index ? 0 : (state.physicsTime - p.times[index]) / (p.times[next] - p.times[index]);
+  // Interpolate both recorded skeletons on the same clock, avoiding 50 Hz
+  // camera/pose sample-and-hold jitter at higher browser refresh rates.
+  for (let j = 0; j < stride; j++) {
+    p.actualPose[j] = THREE.MathUtils.lerp(p.actual_positions[index*stride+j],p.actual_positions[next*stride+j],blend);
+    p.referencePose[j] = THREE.MathUtils.lerp(p.reference_positions[index*stride+j],p.reference_positions[next*stride+j],blend);
+  }
+  state.rig.poseWorld(p.actualPose);
+  state.nativeRig.poseWorld(p.referencePose);
+  const lines = state.errorLines.geometry.attributes.position;
+  for (let j = 0; j < p.joints.length; j++) {
+    lines.setXYZ(j*2,...p.actualPose.subarray(j*3,j*3+3));
+    lines.setXYZ(j*2+1,...p.referencePose.subarray(j*3,j*3+3));
+  }
+  lines.needsUpdate = true;
+  state.errorLines.geometry.computeBoundingSphere();
+  replayFrame.value = String(index);
+  replayFrameLabel.textContent = `${state.physicsTime.toFixed(2)} / ${p.times.at(-1).toFixed(2)} s`;
+  planInfo.textContent = `Root drift ${p.root_error_m[index].toFixed(2)} m · mean body error ${p.body_error_m[index].toFixed(2)} m`;
+  targetInfo.textContent = `${p.contacts[index]} contact points · reference aligned only at start`;
+  document.documentElement.dataset.physicsFrame = String(index);
+  document.documentElement.dataset.physicsRootError = String(p.root_error_m[index]);
+  updateCamera();
+}
+
+async function installPhysics() {
+  const response = await fetch('/api/physics');
+  if (response.status === 404) return false; // Older/replay-only handlers.
+  if (!response.ok) throw new Error(`Physics index: HTTP ${response.status}`);
+  const recordings = await response.json();
+  const select = document.querySelector('#physics-select');
+  document.querySelector('#physics-controls').hidden = recordings.length === 0;
+  for (const recording of recordings) {
+    const option = document.createElement('option');
+    option.value = recording.id; option.textContent = recording.title;
+    select.append(option);
+  }
+  select.addEventListener('change', () => {
+    const url = new URL(location.href);
+    if (select.value) url.searchParams.set('physics',select.value);
+    else url.searchParams.delete('physics');
+    location.assign(url);
+  });
+  const id = query.get('physics');
+  if (!id) return false;
+  if (!recordings.some(r => r.id === id)) throw new Error('Unknown physical recording');
+  select.value = id;
+  const p = state.physics = await api(`/api/physics/${encodeURIComponent(id)}`);
+  state.controlsLocked = true;
+  cameraView.distance = 6.5;
+  p.actualPose = new Float32Array(p.joints.length * 3);
+  p.referencePose = new Float32Array(p.joints.length * 3);
+  makeComparisonSkeletons(p.joints,'PHYSICAL','REFERENCE');
+  setGroundPath(state.generatedPath,replayRootPath(p.actual_positions,p.frames,p.joints.length),p.frames);
+  setGroundPath(state.targetPath,replayRootPath(p.reference_positions,p.frames,p.joints.length),p.frames);
+  for (const selector of ['#live-style','#kimodo-controls','.pad','.live-actions','.target-frame-control','.view-options label','.target-help'])
+    document.querySelector(selector).hidden = true;
+  replayControls.hidden = false;
+  replayFrame.max = String(p.frames-1);
+  document.querySelector('#physics-overlay-label').hidden = false;
+  document.querySelector('#physics-overlay').addEventListener('change', event => {
+    state.nativeRig.setVisible(event.target.checked);
+    state.errorLines.visible = event.target.checked;
+    state.targetPath.visible = event.target.checked;
+  });
+  document.querySelector('.legend span:first-child').lastChild.textContent = 'Physical robot';
+  document.querySelector('.legend span:last-child').lastChild.textContent = 'Reference motion';
+  document.querySelector('.target-swatch').style.background = '#65a9ff';
+  document.querySelector('#lede').textContent = 'Recorded SONIC / MuJoCo simulation, not live physics. Green is the actuated robot; blue is the reference. Pink links show tracking error, including trajectory drift.';
+  document.querySelector('#camera-help').textContent = 'Drag to orbit · wheel to zoom · scrub to inspect · camera follows the physical robot';
+  document.querySelector('#backend').textContent = 'Upstream SONIC · TensorRT · MuJoCo';
+  statusElement.textContent = p.diagnostics.failure
+    ? `Recorded simulation · FAILED: ${p.diagnostics.failure}`
+    : 'Recorded simulation · no falls or resets';
+  testResult.textContent = `Joint RMSE ${p.diagnostics.joint_rmse_rad.toFixed(3)} rad · final root drift ${p.diagnostics.root_xy_final_error_m.toFixed(2)} m`;
+  if (p.diagnostics.contact_slip)
+    testResult.textContent += ` · mean contact slip ${(p.diagnostics.contact_slip.tangential_speed_mean_mps*100).toFixed(1)} cm/s`;
+  renderPhysics();
+  requestAnimationFrame(animate);
+  document.documentElement.dataset.testStatus = 'ready';
+  return true;
+}
+
+async function installStream() {
+  const response=await fetch('/api/stream');if(response.status===404)return false;
+  if(!response.ok)throw new Error('Cannot query streaming capabilities');
+  const capability=await response.json();if(!capability.available)return false;
+  const section=document.querySelector('#live-physics-controls'),toggle=document.querySelector('#live-physics');
+  const reset=document.querySelector('#live-physics-reset'),pause=document.querySelector('#stream-pause');
+  const collisionToggle=document.querySelector('#show-collisions');
+  collisionToggle.disabled=!capability.physics;
+  section.hidden=false;toggle.disabled=!capability.physics;reset.textContent='Reset session';pause.hidden=false;
+  state.session='server-stream';state.targets={frames:0,joints:34,roots:[],rotations:[]};
+  const s=state.stream={client:null,rig:null,label:null,paused:false,physics:false,owner:false,rendered:null,lastEpoch:null,error:''};
+  const info=document.querySelector('#live-physics-status');
+  const prepareCollisions=()=>{
+    if(!s.collisionDefinitions||s.collisions)return;
+    s.collisions=new CollisionGeometry(s.collisionDefinitions.shapes);scene.add(s.collisions.group);
+    s.collisionsID=s.collisionDefinitions.id;
+  };
+  const client=s.client=new StreamClient(message=>{
+    if(message.type==='hello') {
+      s.owner=message.owner;lockMotionControls(!s.owner);reset.disabled=!s.owner;pause.disabled=!s.owner;toggle.disabled=!s.owner||!capability.physics;
+      statusElement.textContent=s.owner?'Connected · server controls motion and simulation':'Spectating · another client controls the session';
+      document.documentElement.dataset.streamConnected='true';return;
+    }
+    if(message.type==='disconnected') {lockMotionControls(true);toggle.disabled=true;reset.disabled=true;pause.disabled=true;statusElement.textContent='Disconnected · reconnecting without resetting the session';document.documentElement.dataset.streamConnected='false';return;}
+    if(message.type==='error') {s.error=message.error;info.textContent=message.error;statusElement.textContent=`Simulation stopped: ${message.error}`;document.documentElement.dataset.streamError=message.error;return;}
+    if(message.type==='ack') {document.documentElement.dataset.streamAck=JSON.stringify(message);if(message.state==='rejected')info.textContent=message.error;return;}
+    if(message.type==='targets') {
+      state.targets=message.targets??{frames:0,joints:34,roots:[],rotations:[]};
+      for(let i=0;i<state.targets.frames;i++)state.targetRigs[i].pose(state.targets.roots,state.targets.rotations,i,state.targets.frames);
+      document.documentElement.dataset.planSequence=String(Number(document.documentElement.dataset.planSequence||0)+1);
+      updateTargetVisibility();return;
+    }
+    if(message.type==='collision_shapes') {
+      if(message.id&&s.collisionsID===message.id&&s.collisions)return;
+      s.collisions?.dispose();s.collisions=null;s.collisionDefinitions=message;
+      if(collisionToggle.checked)prepareCollisions();
+      document.documentElement.dataset.collisionShapeCount=String(message.shapes.length);return;
+    }
+    if(message.type==='frame') {
+      document.documentElement.dataset.livePhysicsTime=String(message.time);
+      document.documentElement.dataset.streamTick=String(message.tick);
+      document.documentElement.dataset.streamError=message.error??'';
+      document.documentElement.dataset.streamHolding=String(message.holding===true);
+      document.documentElement.dataset.streamFallen=String(message.fallen===true);
+      document.documentElement.dataset.streamPhysicsTime=String(message.physics_time??0);
+      s.planning=message.planning===true;
+      s.error=message.error??'';
+      const uiKey=`${message.epoch}:${message.physics}:${message.paused}:${message.kind}:${message.style}:${message.error}:${message.fallen}`;
+      if(s.uiKey===uiKey&&performance.now()-(s.uiAt??0)<100)return;
+      s.uiKey=uiKey;s.uiAt=performance.now();
+      if(message.epoch!==s.lastEpoch){s.lastEpoch=message.epoch;cameraFollow.position=null;}
+      s.paused=message.paused;pause.textContent=s.paused?'Resume':'Pause';s.physics=message.physics;
+      pause.disabled=!s.owner||Boolean(message.error);
+      toggle.checked=s.physics;document.documentElement.dataset.livePhysics=String(s.physics);
+      const locked=message.kind!=='motion';lockMotionControls(!s.owner||locked);
+      state.jumpActive=message.kind==='jump';
+      document.documentElement.dataset.kimodoState=message.kind==='kimodo'?'playing':'inactive';
+      document.documentElement.dataset.plannedJump=String(state.jumpActive);
+      kimodoProgress.hidden=message.kind!=='kimodo';kimodoProgressBar.value=message.progress;kimodoProgressLabel.textContent=`${Math.round(message.progress*100)}%`;kimodoPhase.textContent='Server-controlled Kimodo playback';
+      planInfo.textContent=`${message.style.replaceAll('_',' ')} · server time ${message.time.toFixed(2)} s`;
+      state.rig.boneMaterial.color.setHex(s.physics?0x65a9ff:0x55efc4);state.rig.jointMaterial.color.setHex(s.physics?0xaacaff:0xd9fff3);state.rig.setOpacity(s.physics?.65:1);
+      document.querySelector('.legend span:first-child').lastChild.textContent=s.physics?'Generated reference':'Animated model';
+      if(message.error)info.textContent=`${message.error}. Disable Live physics to continue the reference animation, or Reset session to start over.`;
+      else info.textContent=`WebSocket · ${s.physics?'GGML SONIC + MuJoCo':'kinematic reference'} · ${message.paused?'paused':'50 Hz server stream'} · ${client.buffer.underruns} playback underruns${message.fallen?' · Fall detected; physics continues':''}`;
+    }
+  });
+  toggle.addEventListener('change',()=>client.send('physics',{enabled:toggle.checked}));
+  collisionToggle.addEventListener('change',()=>{if(collisionToggle.checked){try{prepareCollisions()}catch(error){collisionToggle.checked=false;info.textContent=`Collision overlay unavailable: ${error.message}`;}}});
+  reset.addEventListener('click',()=>client.send('reset'));
+  pause.addEventListener('click',()=>client.send(s.paused?'resume':'pause'));
+  if(query.get('qa')==='1')window.__motionBricksStreamQA={
+    snapshot:()=>({rendered:s.rendered,queue:client.buffer.frames.length,underruns:client.buffer.underruns,waiting:client.buffer.waiting,serverTime:client.buffer.frames.at(-1)?.time??0}),
+    send:(type,values)=>client.send(type,values),disconnect:()=>client.socket.close(),
+  };
+  return true;
+}
+
+function renderStream(delta) {
+  const s=state.stream,sample=s.client.buffer.sample(delta);if(!sample)return;
+  const {a,b,alpha}=sample;
+  const roots=[...a.root,...b.root],rotations=[...a.rotations,...b.rotations];
+  state.motion={frames:2,joints:34,roots,rotations};state.playhead=alpha;
+  state.rig.poseInterpolated(roots,rotations,alpha,2);
+  const root=a.root.map((v,i)=>v+(b.root[i]-v)*alpha);
+  let physical=null;
+  if(a.physics&&b.physics&&a.physical&&b.physical) {
+    if(!s.rig){
+      const joints=a.parents.map((parent,i)=>({parent,name:`physical_${i}`,position:a.physical.slice(i*3,i*3+3)}));
+      s.rig=new SkeletonRig(joints,{color:0x55efc4,jointColor:0xd9fff3,rootColor:0xffd166,emissive:0x0c5b49,rootEmissive:0x6a3b00,emissiveIntensity:.8,radius:.022,jointRadius:.034,rootRadius:.062,opacity:1,diamonds:false,renderOrder:7,label:'PHYSICAL',labelColor:'#55efc4'});
+      s.label=labelSprite('REFERENCE','#65a9ff',.9);scene.add(s.label);
+    }
+    physical=a.physical.map((v,i)=>v+(b.physical[i]-v)*alpha);s.rig.poseWorld(physical);s.rig.setVisible(true);s.label.visible=true;s.label.position.copy(state.rig.jointMeshes[0].position).add(new THREE.Vector3(-.25,.5,0));
+  }else if(s.rig){s.rig.setVisible(false);s.label.visible=false;}
+  if(s.collisions) {
+    if(physical&&document.querySelector('#show-collisions').checked)s.collisions.pose(a.collision_transforms,b.collision_transforms,alpha);
+    else s.collisions.group.visible=false;
+    document.documentElement.dataset.collisionsVisible=String(s.collisions.group.visible);
+  }
+  s.rendered={time:a.time+(b.time-a.time)*alpha,root,physical,epoch:a.epoch,buffering:sample.buffering,holding:a.holding===true&&b.holding===true};
+  if(query.get('qa')==='1')s.rendered.reference=state.rig.jointMeshes.flatMap(joint=>joint.position.toArray());
+  if(query.get('qa')==='1'&&s.collisions?.group.visible)s.rendered.collisions=s.collisions.meshes.map(mesh=>({name:mesh.name,position:mesh.position.toArray(),rotation:mesh.quaternion.toArray(),opacity:mesh.material.opacity}));
+  document.documentElement.dataset.streamPlaybackTime=String(s.rendered.time);
+  document.documentElement.dataset.streamUnderruns=String(s.client.buffer.underruns);
+  if(s.client.socket.readyState===WebSocket.OPEN)statusElement.textContent=s.error?`Simulation stopped: ${s.error}`:s.paused?'Simulation paused':s.planning?'Waiting for motion planner…':sample.buffering?'Buffering streamed poses…':'Streaming · interpolated playback';
+  updateCamera();
+}
+
+async function installLivePhysics() {
+  const response = await fetch('/api/live-physics');
+  if (response.status === 404) return;
+  if (!response.ok) throw new Error('Cannot query live physics');
+  const info = await response.json();
+  if (!info.available) return;
+  const section = document.querySelector('#live-physics-controls');
+  const toggle = document.querySelector('#live-physics');
+  const reset = document.querySelector('#live-physics-reset');
+  section.hidden = false;
+  state.live = {enabled:false, busy:false, queue:[], elapsed:0, rig:null, current:null,
+    previous:null, fallen:false, deferredPlan:null, deferredKimodo:false,
+    owner:Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')};
+  async function release() {
+    const l=state.live;
+    if(l.busy) return false;
+    l.busy=true;
+    try {
+      await api('/api/live-physics',{session:l.owner,release:true});
+      l.queue=[];l.current=null;l.previous=null;l.elapsed=0;l.fallen=false;
+      l.deferredPlan=null;l.deferredKimodo=false;
+      document.querySelector('#live-physics-status').textContent='Physical state reset explicitly. Waiting for the next control tick.';
+      return true;
+    } finally {l.busy=false;}
+  }
+  toggle.addEventListener('change', async () => {
+    const l=state.live;
+    if(l.busy || l.queue.length) {l.disableRequested=!toggle.checked;toggle.checked=l.enabled;return;}
+    try {
+      if(!toggle.checked) await release();
+      l.enabled=toggle.checked;reset.disabled=!l.enabled;
+      if(l.rig) l.rig.setVisible(l.enabled);
+      if(l.referenceLabel) l.referenceLabel.visible=l.enabled;
+      state.rig.boneMaterial.color.setHex(l.enabled?0x65a9ff:0x55efc4);
+      state.rig.jointMaterial.color.setHex(l.enabled?0xaacaff:0xd9fff3);
+      state.rig.setOpacity(l.enabled?.65:1);
+      document.querySelector('.legend span:first-child').lastChild.textContent=l.enabled?'Generated reference':'Animated model';
+      document.querySelector('.animated-swatch').style.background=l.enabled?'#65a9ff':'#55efc4';
+      document.documentElement.dataset.livePhysics=String(l.enabled);
+      document.querySelector('#live-physics-status').textContent=l.enabled
+        ? 'Live GGML SONIC + MuJoCo · blue reference, green physical, warm target keyframes. No pose resets on replanning or Kimodo transitions.'
+        : 'Physics off · kinematic playback';
+    } catch(error) {document.querySelector('#live-physics-status').textContent=error.message;}
+  });
+  reset.addEventListener('click',async()=>{
+    if(state.live.busy || state.live.queue.length) {state.live.resetRequested=true;return;}
+    try {await release();} catch(error){document.querySelector('#live-physics-status').textContent=error.message;}
+  });
+}
+
+async function requestLiveBatch() {
+  const l=state.live;
+  if(!l?.enabled || l.busy || l.queue.length || l.fallen || state.pending ||
+      (state.controlsLocked && !state.kimodo) || state.kimodo?.finishing) return;
+  if(l.deferredKimodo) {l.deferredKimodo=false;void beginKimodo();return;}
+  if(l.deferredPlan && !state.kimodo) {
+    const request=l.deferredPlan;l.deferredPlan=null;void requestPlan(Math.floor(state.playhead),request.override);return;
+  }
+  l.busy=true;
+  const begin=state.playhead;
+  const source=state.motion;
+  const base=Math.min(source.frames-2,Math.floor(begin));
+  const frames=Math.min(64,source.frames-base);
+  const motion={frames,joints:34,roots:source.roots.slice(base*3,(base+frames)*3),
+    rotations:source.rotations.slice(base*136,(base+frames)*136)};
+  const steps=state.kimodo ? Math.max(1,Math.min(5,Math.ceil((source.frames-1-begin)/.6))) : 5;
+  try {
+    const response=await api('/api/live-physics',{session:l.owner,motion,frame:begin-base,steps});
+    if(!l.rig) {
+      const joints=response.parents.map((parent,i)=>({parent,name:`physical_${i}`,position:response.frames[0].actual.slice(i*3,i*3+3)}));
+      l.rig=new SkeletonRig(joints,{color:0x55efc4,jointColor:0xd9fff3,rootColor:0xffd166,
+        emissive:0x0c5b49,rootEmissive:0x6a3b00,emissiveIntensity:.8,radius:.022,jointRadius:.034,
+        rootRadius:.062,opacity:1,diamonds:false,renderOrder:7,label:'PHYSICAL',labelColor:'#55efc4'});
+      l.referenceLabel=labelSprite('REFERENCE','#65a9ff',.9);scene.add(l.referenceLabel);
+    }
+    l.rig.setVisible(true);
+    l.queue=response.frames.map((frame,i)=>({...frame,playhead:Math.min(source.frames-1,begin+(i+1)*.6)}));
+    if(!l.current) {l.current=l.queue[0];l.previous=l.current;}
+    l.elapsed=0;
+  } catch(error) {
+    l.fallen=true;document.querySelector('#live-physics-status').textContent=`Physics paused: ${error.message}. Reset explicitly to retry.`;
+  } finally {l.busy=false;}
+}
+
+function advanceLivePhysics(delta) {
+  const l=state.live;
+  if(l.queue.length) {
+    l.elapsed+=delta;
+    while(l.elapsed>=.02 && l.queue.length) {
+      l.elapsed-=.02;l.previous=l.current;l.current=l.queue.shift();state.playhead=l.current.playhead;
+      document.documentElement.dataset.livePhysicsTime=String(l.current.time);
+      if(l.current.fallen) {
+        document.querySelector('#live-physics-status').textContent='Fall detected; physics continues.';
+      }
+    }
+  }
+  // Wait for computation/network without skipping physical ticks or advancing
+  // the reference alone. Each new plan/clip retains the same physical session.
+  if(!l.queue.length && !l.busy && l.disableRequested) {
+    l.disableRequested=false;const toggle=document.querySelector('#live-physics');toggle.checked=false;toggle.dispatchEvent(new Event('change'));
+  } else if(!l.queue.length && !l.busy && l.resetRequested) {
+    l.resetRequested=false;document.querySelector('#live-physics-reset').click();
+  } else if(!l.queue.length && !state.qaPaused) void requestLiveBatch();
+}
+
+function renderLivePhysics() {
+  const l=state.live;if(!l.rig || !l.current)return;
+  const next=l.queue[0]??l.current,alpha=l.queue.length?Math.min(1,l.elapsed/.02):1;
+  const pose=new Float32Array(90);
+  for(let i=0;i<90;i++)pose[i]=l.current.actual[i]+alpha*(next.actual[i]-l.current.actual[i]);
+  l.rig.poseWorld(pose);
+  l.referenceLabel.position.copy(state.rig.jointMeshes[0].position).add(new THREE.Vector3(-.25,.5,0));
+  const drift=Math.hypot(l.current.actual[0]-l.current.reference[0],l.current.actual[2]-l.current.reference[2]);
+  targetInfo.textContent=`Physical ${l.current.time.toFixed(2)} s · drift ${drift.toFixed(2)} m · ${l.current.contacts} contacts`;
+  updateCamera();
+}
+
 async function start() {
   try {
+    if (await installPhysics()) return;
     state.meta = await api('/api/meta');
     if (state.meta.runtime === 'comparison') {
       await startComparison();
@@ -1210,8 +1577,10 @@ async function start() {
     installKimodo(state.meta.kimodo_clips);
     makeSkeletons(state.meta.joints);
     installMotionQAHook();
+    if(await installStream()) {requestAnimationFrame(animate);document.documentElement.dataset.testStatus='ready';return;}
     const initial = await api('/api/session', {style: state.style});
     useMotion(initial);
+    await installLivePhysics();
     renderMotion(0);
     requestAnimationFrame(animate);
     if (query.get('test') === '1') await selfTest();

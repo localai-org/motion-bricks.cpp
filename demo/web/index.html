@@ -14,6 +14,18 @@
       <p class="eyebrow">MOTIONBRICKS / G1</p>
       <h1>Whole-body motion</h1>
       <p class="lede" id="lede">Move with WASD. The character faces its travel direction; arrow keys turn independently.</p>
+      <section id="physics-controls" hidden>
+        <label for="physics-select">Playback mode</label>
+        <select id="physics-select"><option value="">Interactive MotionBricks (kinematic)</option></select>
+        <label id="physics-overlay-label" hidden><input id="physics-overlay" type="checkbox" checked> Show reference and error links</label>
+      </section>
+      <section id="live-physics-controls" hidden>
+        <label><input id="live-physics" type="checkbox"> Live physics · GGML SONIC</label>
+        <label><input id="show-collisions" type="checkbox" disabled> Show collision geometry</label>
+        <button id="live-physics-reset" type="button" disabled>Reset physical robot</button>
+        <button id="stream-pause" type="button" hidden>Pause</button>
+        <p id="live-physics-status" role="status">Blue: generated reference · green: physical robot · warm colours: target keyframes. Also applies to Kimodo playback.</p>
+      </section>
       <div class="legend" aria-label="Skeleton legend">
         <span><i class="animated-swatch"></i>Animated model</span>
         <span><i class="target-swatch"></i>Target keyframes</span>

@@ -117,11 +117,11 @@ mb_status open_component(neural_runtime & runtime, const std::filesystem::path &
 
 } // namespace
 
-mb_status create_neural_runtime(const std::filesystem::path & bundle,
+static mb_status create_runtime(const std::filesystem::path & bundle,
                                 mb_device device, std::uint32_t threads,
                                 const std::string & backend_directory,
                                 std::shared_ptr<neural_runtime> & output,
-                                std::string & reason) {
+                                std::string & reason, bool sonic) {
     output.reset();
     if (!backend_directory.empty()) ggml_backend_load_all_from_path(backend_directory.c_str());
     auto runtime = std::make_shared<neural_runtime>();
@@ -148,7 +148,18 @@ mb_status create_neural_runtime(const std::filesystem::path & bundle,
         setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
         setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
 #endif
-        runtime->backend.reset(ggml_backend_vk_init(0));
+        try {
+            // ggml_backend_vk_init(0) asserts if discovery returned no devices.
+            // Driver/sandbox failures must be an API error, not an ABI abort.
+            if (ggml_backend_vk_get_device_count() == 0) {
+                reason = "no accessible Vulkan devices";
+                return MB_BACKEND_UNAVAILABLE;
+            }
+            runtime->backend.reset(ggml_backend_vk_init(0));
+        } catch (const std::exception & e) {
+            reason = std::string("cannot initialize Vulkan backend: ") + e.what();
+            return MB_BACKEND_UNAVAILABLE;
+        }
 #else
         reason = "this build has no Vulkan backend";
         return MB_BACKEND_UNAVAILABLE;
@@ -158,6 +169,12 @@ mb_status create_neural_runtime(const std::filesystem::path & bundle,
         reason = selected == MB_DEVICE_VULKAN ? "cannot initialize Vulkan backend"
                                                : "cannot initialize CPU backend";
         return MB_BACKEND_UNAVAILABLE;
+    }
+    if (sonic) {
+        const auto status = open_component(*runtime, bundle, "sonic", reason);
+        if (status != MB_OK) return status;
+        output = std::move(runtime);
+        return MB_OK;
     }
     constexpr std::array files{
         std::pair{"pose", "pose.gguf"}, std::pair{"root", "root.gguf"},
@@ -169,6 +186,18 @@ mb_status create_neural_runtime(const std::filesystem::path & bundle,
     }
     output = std::move(runtime);
     return MB_OK;
+}
+
+mb_status create_neural_runtime(const std::filesystem::path & bundle, mb_device device,
+    std::uint32_t threads, const std::string & directory,
+    std::shared_ptr<neural_runtime> & output, std::string & reason) {
+    return create_runtime(bundle, device, threads, directory, output, reason, false);
+}
+
+mb_status create_sonic_runtime(const std::filesystem::path & file, mb_device device,
+    std::uint32_t threads, const std::string & directory,
+    std::shared_ptr<neural_runtime> & output, std::string & reason) {
+    return create_runtime(file, device, threads, directory, output, reason, true);
 }
 
 ggml_backend_t neural_backend(const neural_runtime & runtime) noexcept {
@@ -210,6 +239,12 @@ bool neural_copy_f32(const neural_runtime & runtime,
 #else
 
 class neural_runtime {};
+
+mb_status create_sonic_runtime(const std::filesystem::path &, mb_device, std::uint32_t,
+    const std::string &, std::shared_ptr<neural_runtime> &, std::string & reason) {
+    reason = "this build has no GGML support";
+    return MB_BACKEND_UNAVAILABLE;
+}
 
 mb_status create_neural_runtime(const std::filesystem::path &, mb_device, std::uint32_t,
                                 const std::string &, std::shared_ptr<neural_runtime> & output,

@@ -331,6 +331,7 @@ int run(const std::filesystem::path & fixture_path, const std::filesystem::path 
         // neural inference; agent_blend_test independently gates that seam
         // against captured raw/filtered upstream qpos.
         command->skip_context_blend=1U;
+        command->sampling_argmax=1U; // These fixtures explicitly captured upstream argmax.
         auto * style=styles[static_cast<std::size_t>(expected.mode)].get();
         if (!call(mb_command_set_style(command.get(),style,error.data(),error.size()),"set style",error.data()) ||
             !call(mb_command_set_movement_direction(command.get(),expected.movement[0],expected.movement[1],expected.movement[2],error.data(),error.size()),"set movement",error.data()) ||

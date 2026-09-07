@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/binary"
@@ -45,19 +46,20 @@ type session struct {
 }
 
 type demoServer struct {
-	library     *mb.Library
-	model       *mb.Model
-	styles      map[string]*mb.Style
-	ordered     []styleInfo
-	joints      []mb.Joint
-	kimodo      map[string]*kimodoClip
-	clips       []kimodoClipInfo
-	planMu      sync.Mutex
-	uploadMu    sync.Mutex
-	uploadBytes int
-	mu          sync.Mutex
-	sessions    map[string]*session
-	static      http.Handler
+	library        *mb.Library
+	model          *mb.Model
+	styles         map[string]*mb.Style
+	ordered        []styleInfo
+	joints         []mb.Joint
+	kimodo         map[string]*kimodoClip
+	clips          []kimodoClipInfo
+	planMu         sync.Mutex
+	uploadMu       sync.Mutex
+	uploadBytes    int
+	samplingArgmax bool
+	mu             sync.Mutex
+	sessions       map[string]*session
+	static         http.Handler
 }
 
 type replayMetadata struct {
@@ -399,6 +401,9 @@ func (s *demoServer) commandPlan(item *session, style *mb.Style, request planReq
 		return nil, err
 	}
 	defer command.Close()
+	if err = command.SetSamplingArgmax(s.samplingArgmax); err != nil {
+		return nil, err
+	}
 	if err = command.SetStyle(style); err != nil {
 		return nil, err
 	}
@@ -671,9 +676,18 @@ func main() {
 	kimodoPath := flag.String("kimodo-dir", os.Getenv("MOTIONBRICKS_KIMODO_DIR"), "directory containing Kimodo G1 animation.glb files")
 	replayPath := flag.String("replay", os.Getenv("MOTIONBRICKS_REPLAY"), "portable .mbreplay session (disables native planning)")
 	comparisonPath := flag.String("comparison", os.Getenv("MOTIONBRICKS_COMPARISON"), "open-loop parity report JSON (disables native planning)")
+	physicsPath := flag.String("physics-dir", os.Getenv("MOTIONBRICKS_PHYSICS_DIR"), "directory of recorded SONIC playback JSON files (retains native planning)")
+	sonicPath := flag.String("sonic-model", os.Getenv("MOTIONBRICKS_SONIC_MODEL"), "SONIC G1 GGUF; enables live physics")
+	scenePath := flag.String("physics-scene", os.Getenv("MOTIONBRICKS_PHYSICS_SCENE"), "official G1 MuJoCo scene XML")
+	physicsConfig := flag.String("physics-config", os.Getenv("MOTIONBRICKS_PHYSICS_CONFIG"), "validated G1 .mbphysics configuration")
 	deviceName := flag.String("device", "cpu", "auto, cpu, or vulkan")
+	samplingName := flag.String("sampling", "gumbel", "gumbel (upstream default) or argmax (diagnostics)")
 	flag.Parse()
+	if *samplingName != "gumbel" && *samplingName != "argmax" {
+		log.Fatal("-sampling must be gumbel or argmax")
+	}
 	var handler http.Handler
+	var nativeDemo *demoServer
 	closeDemo := func() {}
 	if *replayPath != "" && *comparisonPath != "" {
 		log.Fatal("-replay and -comparison are mutually exclusive")
@@ -705,19 +719,55 @@ func main() {
 			demo.Close()
 			log.Fatal(err)
 		}
+		demo.samplingArgmax = *samplingName == "argmax"
 		if len(demo.clips) > 0 {
 			log.Printf("loaded %d Kimodo G1 animations", len(demo.clips))
 		}
 		handler = demo.routes()
+		nativeDemo = demo
 		closeDemo = demo.Close
 	}
 	defer closeDemo()
+	var livePhysics *mb.Physics
+	if *sonicPath != "" {
+		device, err := parseDevice(*deviceName)
+		if err != nil {
+			log.Fatal(err)
+		}
+		livePhysics, err = mb.OpenPhysics(*libraryPath, *sonicPath, *scenePath, *physicsConfig, device)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer livePhysics.Close()
+	}
+	if nativeDemo != nil {
+		stream := newStreamHub(nativeDemo, livePhysics)
+		defer stream.Close()
+		handler = stream.routes(handler)
+	}
+	var physicsErr error
+	handler, physicsErr = physicsRoutes(handler, *physicsPath)
+	if physicsErr != nil {
+		log.Fatal(physicsErr)
+	}
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	stopped := make(chan os.Signal, 1)
 	signal.Notify(stopped, os.Interrupt, syscall.SIGTERM)
-	go func() { <-stopped; _ = server.Close() }()
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-stopped
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			// Never free native handles while a handler is still using them.
+			log.Printf("shutdown timed out: %v", err)
+			os.Exit(1)
+		}
+		close(shutdownDone)
+	}()
 	log.Printf("MotionBricks demo: http://%s", *listen)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	<-shutdownDone
 }

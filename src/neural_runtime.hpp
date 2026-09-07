@@ -18,6 +18,12 @@ namespace motionbricks::detail {
 
 class neural_runtime;
 
+mb_status create_sonic_runtime(const std::filesystem::path & file,
+                              mb_device device, std::uint32_t threads,
+                              const std::string & backend_directory,
+                              std::shared_ptr<neural_runtime> & output,
+                              std::string & reason);
+
 mb_status create_neural_runtime(const std::filesystem::path & bundle,
                                 mb_device device, std::uint32_t threads,
                                 const std::string & backend_directory,

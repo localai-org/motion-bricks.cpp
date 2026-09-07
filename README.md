@@ -9,6 +9,13 @@ GGUF loading, root/duration planning, pose-token prediction, VQ decoding,
 output. CPU and Vulkan use the same public API and preserve the same duration
 and pose-token decisions in the reference suite.
 
+The demo also offers optional native MuJoCo physics driven by **GGML SONIC**,
+including Kimodo animation playback, with target/reference/physical skeletons.
+The original G1 mode-0 policy passes independent CPU/Vulkan layer parity.
+See [SONIC setup, results and limitations](docs/SONIC-GGML.md).
+The browser sends WebSocket commands and renders buffered server-owned motion;
+see [streaming and client QA](docs/STREAMING.md).
+
 ## Build
 
 The normal build uses CMake and does not depend on Nix:
@@ -141,6 +148,10 @@ converted upstream styles. It uses the reusable PureGo binding and the same
 stateful native agent as other applications. See the
 [demo guide](docs/DEMO.md) for build, run, architecture, and headless-Chromium
 test instructions.
+
+Pose tokens now use upstream-style Gumbel sampling by default. An explicit
+argmax mode remains available for diagnostics; [sampling validation](docs/SAMPLING.md)
+uses shared random draws rather than assuming identical framework RNG seeds.
 
 The observational-parity tools can also turn the accepted upstream session
 into one immutable `.mbreplay` file consumed by the C++ CLI and the Three.js

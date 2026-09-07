@@ -23,6 +23,12 @@ target_include_directories(motionbricks-context-endpoints-test PRIVATE "${PROJEC
 target_link_libraries(motionbricks-context-endpoints-test PRIVATE motionbricks_static)
 add_test(NAME motionbricks-context-endpoints COMMAND motionbricks-context-endpoints-test)
 
+add_executable(motionbricks-sampling-test sampling_test.cpp "${PROJECT_SOURCE_DIR}/src/sampling.cpp")
+target_include_directories(motionbricks-sampling-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+add_test(NAME motionbricks-sampling COMMAND motionbricks-sampling-test)
+add_test(NAME motionbricks-sampling-upstream COMMAND motionbricks-sampling-test
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/upstream-gumbel.mbsampling")
+
 add_executable(motionbricks-agent-blend-test agent_blend_test.cpp)
 target_include_directories(motionbricks-agent-blend-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(motionbricks-agent-blend-test PRIVATE motionbricks_static)
@@ -200,13 +206,57 @@ if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS AND
         TIMEOUT 60)
 endif()
 
+if(MOTIONBRICKS_ENABLE_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT MOTIONBRICKS_SANITIZE)
+        message(FATAL_ERROR "Sampling/API fuzzing requires Clang and MOTIONBRICKS_SANITIZE=ON")
+    endif()
+    add_executable(motionbricks-sampling-fuzz sampling_fuzz.cpp)
+    target_include_directories(motionbricks-sampling-fuzz PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-sampling-fuzz PRIVATE motionbricks_static)
+    target_compile_options(motionbricks-sampling-fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(motionbricks-sampling-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    # Instrument code under test for coverage, not only the harness.
+    target_compile_options(motionbricks_static PRIVATE -fsanitize=fuzzer-no-link)
+    add_executable(motionbricks-sonic-fuzz sonic_fuzz.cpp)
+    target_link_libraries(motionbricks-sonic-fuzz PRIVATE motionbricks_static)
+    target_compile_options(motionbricks-sonic-fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(motionbricks-sonic-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
+
+add_executable(motionbricks-sonic-api-test sonic_api_test.cpp)
+target_link_libraries(motionbricks-sonic-api-test PRIVATE motionbricks_shared)
+if(MOTIONBRICKS_ENABLE_PHYSICS)
+    target_sources(motionbricks-sonic-api-test PRIVATE physics_collision_test.cpp)
+    target_include_directories(motionbricks-sonic-api-test PRIVATE "${MUJOCO_INCLUDE_DIR}")
+    target_link_libraries(motionbricks-sonic-api-test PRIVATE "${MUJOCO_LIBRARY}")
+    target_compile_definitions(motionbricks-sonic-api-test PRIVATE MOTIONBRICKS_TEST_COLLISIONS=1)
+endif()
+add_test(NAME motionbricks-sonic-api COMMAND motionbricks-sonic-api-test)
+set(MOTIONBRICKS_SONIC_GGUF "${PROJECT_SOURCE_DIR}/generated/sonic/ggml/sonic-g1.gguf" CACHE FILEPATH "Local SONIC GGUF; tests never download it")
+set(MOTIONBRICKS_SONIC_FIXTURE "${PROJECT_SOURCE_DIR}/generated/sonic/ggml/all-layers.mbsonic" CACHE FILEPATH "Local independent upstream layer fixture")
+set(MOTIONBRICKS_PHYSICS_SCENE "${PROJECT_SOURCE_DIR}/generated/sonic/assets/gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml" CACHE FILEPATH "Local SONIC physical scene")
+set(MOTIONBRICKS_PHYSICS_CONFIG "${PROJECT_SOURCE_DIR}/generated/sonic/ggml/g1.mbphysics" CACHE FILEPATH "Local verified motor/geometry config")
+if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND MOTIONBRICKS_ENABLE_PHYSICS AND EXISTS "${MOTIONBRICKS_SONIC_GGUF}" AND EXISTS "${MOTIONBRICKS_PHYSICS_SCENE}" AND EXISTS "${MOTIONBRICKS_PHYSICS_CONFIG}")
+    add_test(NAME motionbricks-sonic-physics-api COMMAND motionbricks-sonic-api-test "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_PHYSICS_SCENE}" "${MOTIONBRICKS_PHYSICS_CONFIG}")
+endif()
+if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND EXISTS "${MOTIONBRICKS_SONIC_GGUF}" AND EXISTS "${MOTIONBRICKS_SONIC_FIXTURE}")
+    add_test(NAME motionbricks-sonic-api-model COMMAND motionbricks-sonic-api-test "${MOTIONBRICKS_SONIC_GGUF}")
+    add_test(NAME motionbricks-sonic-parity-cpu COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" cpu)
+    if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        add_test(NAME motionbricks-sonic-parity-vulkan COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" vulkan)
+        set_tests_properties(motionbricks-sonic-parity-vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+    endif()
+endif()
+
 if(MOTIONBRICKS_SANITIZE)
     foreach(target
+            motionbricks-sonic-api-test
             motionbricks-c-api-test
             motionbricks-cpp-wrapper-test
             motionbricks-session-replay-test
             motionbricks-plan-parity-format-test
             motionbricks-context-endpoints-test
+            motionbricks-sampling-test
             motionbricks-agent-blend-test
             motionbricks-pose-parity-test
             motionbricks-decoder-parity-test

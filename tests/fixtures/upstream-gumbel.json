@@ -1,0 +1,8 @@
+{
+  "upstream_revision": "a0732b642c0333077e127a2f56ab0014c196bca4",
+  "source_sha256": "408b468e292bf20a7231b27430c43796d5feeb1740edd3e358767c760e9122ec",
+  "torch": "2.7.0+cu128",
+  "temperature": 1,
+  "rows": 512,
+  "fixture_sha256": "7f0897f6e29e9e77aaa458d88b91829ad07146d14180ff5397e3d599564ac9bb"
+}

@@ -261,6 +261,26 @@ mb_status mb_command_set_seed(mb_command * value, uint64_t seed,
     });
 }
 
+mb_status mb_command_set_sampling_argmax(mb_command * value, uint32_t enabled,
+                                        char * error, uint64_t error_capacity) {
+    return guard(error, error_capacity, [&]() -> mb_status {
+        if (!value || enabled > 1)
+            return fail(MB_INVALID_ARGUMENT, error, error_capacity, "sampling argmax requires a command and 0 or 1");
+        value->sampling_argmax = enabled;
+        return MB_OK;
+    });
+}
+
+mb_status mb_command_get_sampling_argmax(const mb_command * value, uint32_t * output,
+                                        char * error, uint64_t error_capacity) {
+    return guard(error, error_capacity, [&]() -> mb_status {
+        if (!value || !output)
+            return fail(MB_INVALID_ARGUMENT, error, error_capacity, "command or output is null");
+        *output = value->sampling_argmax;
+        return MB_OK;
+    });
+}
+
 mb_status mb_command_get_seed(const mb_command * value, uint64_t * output,
                               char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
