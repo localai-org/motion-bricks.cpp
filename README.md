@@ -79,6 +79,11 @@ ctest --preset asan-ubsan
 
 ## Current ABI
 
+Start with the [API selection guide](docs/API.md): choose stateless MotionBricks
+inference, the optional animation controller, standalone SONIC inference, or
+the SONIC/MuJoCo physics controller. The [inference-only C example](examples/inference.c)
+uses caller-supplied poses without styles or an agent.
+
 The installed C API uses only fixed-width scalars, pointers, and opaque heap
 handles. Callers never reproduce a C or C++ structure layout. All constructors
 have matching free functions, and no C++ exception crosses the ABI boundary.

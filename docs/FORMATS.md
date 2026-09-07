@@ -4,7 +4,7 @@ A reader must reject an unknown major version rather than guessing.
 
 | Format | Version | Status |
 |---|---:|---|
-| Installed C ABI | 1 | Model, style, command, agent, and motion contract implemented |
+| Installed C ABI | 1 | [Model inference, optional controllers, SONIC and physics](API.md) implemented |
 | GGUF model-bundle manifest | 1 | F32 inference components implemented |
 | MotionBricks style asset | 1 | Upstream G1 exemplar schema implemented |
 | Reference fixture manifest | 1 | Root, pose, and decoder fixtures implemented |
@@ -12,7 +12,7 @@ A reader must reject an unknown major version rather than guessing.
 | Open-loop plan parity fixture | 1 | Python writer and checked C++ reader implemented |
 | Open-loop parity report | 1 | C++ writer and Go/Three.js viewer implemented |
 | Native backend comparison | 1 | CPU/Vulkan behavioral gate and neural diagnostics implemented |
-| WebSocket animation protocol | 1 | Reserved; schema not implemented |
+| WebSocket animation protocol | 1 | [Server-owned streaming](STREAMING.md) implemented |
 
 Minor, backwards-compatible additions are represented by optional keys or by
 new API functions. Existing function signatures and field meanings do not

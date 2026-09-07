@@ -2,6 +2,25 @@ add_executable(motionbricks-c-api-test c_api_test.c)
 target_link_libraries(motionbricks-c-api-test PRIVATE motionbricks::motionbricks)
 add_test(NAME motionbricks-c-api COMMAND motionbricks-c-api-test)
 
+add_executable(motionbricks-inference-api-test inference_api_test.c)
+target_link_libraries(motionbricks-inference-api-test PRIVATE motionbricks::motionbricks)
+add_test(NAME motionbricks-inference-api COMMAND motionbricks-inference-api-test)
+add_library(motionbricks-inference-example OBJECT "${PROJECT_SOURCE_DIR}/examples/inference.c")
+target_include_directories(motionbricks-inference-example PRIVATE "${PROJECT_SOURCE_DIR}/include")
+if(MOTIONBRICKS_ENABLE_GGML AND EXISTS "${MOTIONBRICKS_REFERENCE_BUNDLE}/pose.gguf" AND EXISTS "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle")
+    add_executable(motionbricks-inference-model-test inference_model_test.cpp)
+    target_sources(motionbricks-inference-model-test PRIVATE $<TARGET_OBJECTS:motionbricks-inference-example>)
+    target_include_directories(motionbricks-inference-model-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-inference-model-test PRIVATE motionbricks_static)
+    add_test(NAME motionbricks-inference-model COMMAND motionbricks-inference-model-test
+        "${MOTIONBRICKS_REFERENCE_BUNDLE}" "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle")
+    if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        add_test(NAME motionbricks-inference-model-vulkan COMMAND motionbricks-inference-model-test
+            "${MOTIONBRICKS_REFERENCE_BUNDLE}" "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle" vulkan)
+        set_tests_properties(motionbricks-inference-model-vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+    endif()
+endif()
+
 add_executable(motionbricks-cpp-wrapper-test cpp_wrapper_test.cpp)
 target_link_libraries(motionbricks-cpp-wrapper-test PRIVATE motionbricks::motionbricks)
 add_test(NAME motionbricks-cpp-wrapper COMMAND motionbricks-cpp-wrapper-test)
@@ -221,6 +240,10 @@ if(MOTIONBRICKS_ENABLE_FUZZERS)
     target_link_libraries(motionbricks-sonic-fuzz PRIVATE motionbricks_static)
     target_compile_options(motionbricks-sonic-fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
     target_link_options(motionbricks-sonic-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    add_executable(motionbricks-inference-fuzz inference_fuzz.cpp)
+    target_link_libraries(motionbricks-inference-fuzz PRIVATE motionbricks_static)
+    target_compile_options(motionbricks-inference-fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(motionbricks-inference-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()
 
 add_executable(motionbricks-sonic-api-test sonic_api_test.cpp)
@@ -250,6 +273,9 @@ endif()
 
 if(MOTIONBRICKS_SANITIZE)
     foreach(target
+            motionbricks-inference-example
+            motionbricks-inference-api-test
+            motionbricks-inference-model-test
             motionbricks-sonic-api-test
             motionbricks-c-api-test
             motionbricks-cpp-wrapper-test

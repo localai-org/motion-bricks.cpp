@@ -131,6 +131,10 @@ visibly. See [streaming architecture and browser QA](STREAMING.md).
 
 ## C API
 
+Start with the [API selection guide](API.md) and the [SONIC/physics API guide](API-SONIC-PHYSICS.md)
+for the distinction between inference-only calls and the optional controller,
+including observation layouts and joint ordering.
+
 `motionbricks/sonic.h` and `motionbricks/physics.h` expose opaque handles and
 flat caller-owned buffers. No public C/C++ struct layout needs reproduction in
 PureGo. The model must outlive its physical sessions; each session owns its

@@ -268,6 +268,10 @@ The adapter will reject rather than guess when metadata is incompatible.
 
 ## PureGo-compatible C API sketch
 
+This section is the original design sketch. For the implemented interfaces,
+abstraction levels, ownership rules and examples, use the [API guide](API.md)
+and installed headers as the current contract.
+
 All configurable records and returned objects are opaque heap handles. Public
 integer types have explicit widths; booleans and enum-like values are
 `uint32_t`; no C enum or by-value struct is part of the ABI. Every constructor

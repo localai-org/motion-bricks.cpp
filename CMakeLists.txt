@@ -60,6 +60,7 @@ endif()
 
 set(MOTIONBRICKS_SOURCES
     src/capi.cpp
+    src/inference.cpp
     src/decoder.cpp
     src/error.cpp
     src/model.cpp

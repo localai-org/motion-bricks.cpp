@@ -6,6 +6,10 @@ extern "C" {
 #endif
 typedef struct mb_sonic mb_sonic;
 /* Original-release SONIC G1 mode 0, batch one, F32. Options are copied.
+   Inference only: no physics, observation history, timing or motor control.
+   encode: 1762 observation floats -> 64 FSQ token floats.
+   decode: 994 observation floats (tokens first) -> 29 unscaled actions.
+   Observation layouts/order: docs/API-SONIC-PHYSICS.md.
    Calls on a handle are serialized; free requires no calls in flight.
    Buffers belong to the caller; they are never retained. Counts are floats.
    Other encoder modes are rejected, never silently treated as G1.
