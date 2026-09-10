@@ -248,6 +248,12 @@ endif()
 
 add_executable(motionbricks-sonic-api-test sonic_api_test.cpp)
 target_link_libraries(motionbricks-sonic-api-test PRIVATE motionbricks_shared)
+# These checks invoke the ABI inside assert(); keep them active in CPU release builds.
+if(MSVC)
+    target_compile_options(motionbricks-sonic-api-test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(motionbricks-sonic-api-test PRIVATE -UNDEBUG)
+endif()
 if(MOTIONBRICKS_ENABLE_PHYSICS)
     target_sources(motionbricks-sonic-api-test PRIVATE physics_collision_test.cpp)
     target_include_directories(motionbricks-sonic-api-test PRIVATE "${MUJOCO_INCLUDE_DIR}")
@@ -274,11 +280,22 @@ if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND MOTIONBRICKS_ENABLE_PHYSICS AND 
 endif()
 if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND EXISTS "${MOTIONBRICKS_SONIC_GGUF}" AND EXISTS "${MOTIONBRICKS_SONIC_FIXTURE}")
     add_test(NAME motionbricks-sonic-api-model COMMAND motionbricks-sonic-api-test "${MOTIONBRICKS_SONIC_GGUF}")
-    add_test(NAME motionbricks-sonic-parity-cpu COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" cpu)
+    add_test(NAME motionbricks-sonic-parity-cpu COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" cpu 1)
+    add_test(NAME motionbricks-sonic-parity-cpu-2 COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" cpu 2)
     if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
         add_test(NAME motionbricks-sonic-parity-vulkan COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" vulkan)
         set_tests_properties(motionbricks-sonic-parity-vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
     endif()
+endif()
+
+if(MOTIONBRICKS_CPU_ALL_VARIANTS AND TARGET ggml AND NOT MOTIONBRICKS_SANITIZE AND
+   CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND AND
+   EXISTS "${MOTIONBRICKS_SONIC_GGUF}")
+    add_test(NAME motionbricks-cpu-backend-loading
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/backend_loading_test.py"
+            --library "$<TARGET_FILE:motionbricks_shared>"
+            --model "${MOTIONBRICKS_SONIC_GGUF}")
+    set_tests_properties(motionbricks-cpu-backend-loading PROPERTIES TIMEOUT 120)
 endif()
 
 if(MOTIONBRICKS_SANITIZE)

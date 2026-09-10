@@ -7,16 +7,22 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #if defined(MOTIONBRICKS_HAVE_GGML)
-#include <ggml-cpu.h>
 #include <gguf.h>
-#if defined(MOTIONBRICKS_HAVE_VULKAN)
-#include <ggml-vulkan.h>
+#if defined(GGML_BACKEND_DL)
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #endif
 #endif
 
@@ -42,6 +48,29 @@ using context_ptr = std::unique_ptr<ggml_context, ggml_context_deleter>;
 using gguf_ptr = std::unique_ptr<gguf_context, gguf_context_deleter>;
 using backend_ptr = std::unique_ptr<ggml_backend, backend_deleter>;
 using buffer_ptr = std::unique_ptr<ggml_backend_buffer, buffer_deleter>;
+
+#if defined(GGML_BACKEND_DL)
+std::filesystem::path backend_library_directory() {
+    // Locate libggml itself, including when motionbricks is statically linked
+    // or loaded by Python/Go from outside the installation directory.
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(&ggml_backend_load_all), &module)) {
+        std::vector<wchar_t> path(32768);
+        const auto size = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+        if (size > 0 && size < path.size())
+            return std::filesystem::path(std::wstring(path.data(), size)).parent_path();
+    }
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&ggml_backend_load_all), &info) && info.dli_fname)
+        return std::filesystem::absolute(info.dli_fname).parent_path();
+#endif
+    return {};
+}
+#endif
 
 bool copy_gguf_data(const std::filesystem::path & path, ggml_context * tensors,
                     const gguf_context * metadata, std::string & reason) {
@@ -115,30 +144,16 @@ mb_status open_component(neural_runtime & runtime, const std::filesystem::path &
     return MB_OK;
 }
 
-} // namespace
-
-static mb_status create_runtime(const std::filesystem::path & bundle,
-                                mb_device device, std::uint32_t threads,
-                                const std::string & backend_directory,
-                                std::shared_ptr<neural_runtime> & output,
-                                std::string & reason, bool sonic) {
-    output.reset();
-    if (!backend_directory.empty()) ggml_backend_load_all_from_path(backend_directory.c_str());
-    auto runtime = std::make_shared<neural_runtime>();
-    const auto selected = device == MB_DEVICE_AUTO ? MB_DEVICE_CPU : device;
-    if (selected == MB_DEVICE_CPU) {
-        runtime->backend.reset(ggml_backend_cpu_init());
-        if (runtime->backend) {
-            const auto hardware = std::max(1U, std::thread::hardware_concurrency());
-            const auto count = threads == 0U ? hardware : threads;
-            ggml_backend_cpu_set_n_threads(runtime->backend.get(), static_cast<int>(count));
-        }
-    } else if (selected == MB_DEVICE_VULKAN) {
+mb_status initialize_backend(neural_runtime & runtime, mb_device selected,
+                             std::uint32_t threads, const std::string & directory,
+                             std::string & reason) {
+    // GGML's process-wide registry and backend discovery are not thread-safe.
+    static std::mutex registry_mutex;
+    const std::lock_guard lock(registry_mutex);
+    try {
 #if defined(MOTIONBRICKS_HAVE_VULKAN)
-        // GGML's Vulkan F16/cooperative-matrix fast paths may be selected even
-        // for F32 weights.  The released MotionBricks baseline is explicitly
-        // F32, and those paths create material decoder drift after many
-        // residual convolutions.  Keep the parity runtime strictly F32.
+        // Set these before module discovery, which can initialize Vulkan.
+        // Keep the released F32 model's parity contract on every backend.
 #if defined(_WIN32)
         _putenv_s("GGML_VK_DISABLE_F16", "1");
         _putenv_s("GGML_VK_DISABLE_COOPMAT", "1");
@@ -148,28 +163,67 @@ static mb_status create_runtime(const std::filesystem::path & bundle,
         setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
         setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
 #endif
-        try {
-            // ggml_backend_vk_init(0) asserts if discovery returned no devices.
-            // Driver/sandbox failures must be an API error, not an ABI abort.
-            if (ggml_backend_vk_get_device_count() == 0) {
-                reason = "no accessible Vulkan devices";
-                return MB_BACKEND_UNAVAILABLE;
-            }
-            runtime->backend.reset(ggml_backend_vk_init(0));
-        } catch (const std::exception & e) {
-            reason = std::string("cannot initialize Vulkan backend: ") + e.what();
-            return MB_BACKEND_UNAVAILABLE;
+#endif
+#if defined(GGML_BACKEND_DL)
+        // Selection is process-wide. An explicit path overrides the bundled
+        // location on first load; failed discovery remains retryable.
+        static bool backends_loaded = false;
+        if (!backends_loaded) {
+            const auto search = directory.empty() ? backend_library_directory().string() : directory;
+            if (!search.empty()) ggml_backend_load_all_from_path(search.c_str());
+            backends_loaded = ggml_backend_reg_by_name("CPU") != nullptr;
         }
 #else
-        reason = "this build has no Vulkan backend";
-        return MB_BACKEND_UNAVAILABLE;
+        (void) directory;
 #endif
-    }
-    if (!runtime->backend) {
-        reason = selected == MB_DEVICE_VULKAN ? "cannot initialize Vulkan backend"
-                                               : "cannot initialize CPU backend";
+        if (selected == MB_DEVICE_CPU) {
+            runtime.backend.reset(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+            if (runtime.backend) {
+                const auto reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(runtime.backend.get()));
+                const auto set_threads = reinterpret_cast<ggml_backend_set_n_threads_t>(
+                    ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads"));
+                if (!set_threads) {
+                    reason = "CPU backend cannot configure inference threads";
+                    return MB_BACKEND_UNAVAILABLE;
+                }
+                const auto hardware = std::max(1U, std::thread::hardware_concurrency());
+                const auto count = threads == 0U ? hardware : threads;
+                set_threads(runtime.backend.get(), static_cast<int>(count));
+            }
+        } else if (selected == MB_DEVICE_VULKAN) {
+#if defined(MOTIONBRICKS_HAVE_VULKAN)
+            const auto reg = ggml_backend_reg_by_name("Vulkan");
+            if (reg && ggml_backend_reg_dev_count(reg) > 0)
+                runtime.backend.reset(ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, 0), nullptr));
+#else
+            reason = "this build has no Vulkan backend";
+            return MB_BACKEND_UNAVAILABLE;
+#endif
+        }
+    } catch (const std::exception & e) {
+        reason = std::string("cannot initialize inference backend: ") + e.what();
         return MB_BACKEND_UNAVAILABLE;
     }
+    if (!runtime.backend) {
+        reason = selected == MB_DEVICE_VULKAN ? "no accessible Vulkan devices/backend"
+                                             : "cannot find or initialize a compatible CPU backend";
+        return MB_BACKEND_UNAVAILABLE;
+    }
+    return MB_OK;
+}
+
+} // namespace
+
+static mb_status create_runtime(const std::filesystem::path & bundle,
+                                mb_device device, std::uint32_t threads,
+                                const std::string & backend_directory,
+                                std::shared_ptr<neural_runtime> & output,
+                                std::string & reason, bool sonic) {
+    output.reset();
+    auto runtime = std::make_shared<neural_runtime>();
+    const auto selected = device == MB_DEVICE_AUTO ? MB_DEVICE_CPU : device;
+    const auto initialized = initialize_backend(*runtime, selected, threads, backend_directory, reason);
+    if (initialized != MB_OK) return initialized;
     if (sonic) {
         const auto status = open_component(*runtime, bundle, "sonic", reason);
         if (status != MB_OK) return status;

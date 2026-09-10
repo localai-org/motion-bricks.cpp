@@ -78,6 +78,36 @@ cmake --build --preset asan-ubsan
 ctest --preset asan-ubsan
 ```
 
+### SONIC CPU performance
+
+Builds enable GGML runtime CPU selection by default: they package the supported
+CPU variants for the target architecture and load the highest-scoring compatible
+variant. For CPU-only SONIC inference with `-O3` and profiling symbols:
+
+```sh
+cmake --preset sonic-cpu
+cmake --build --preset sonic-cpu
+ctest --preset sonic-cpu
+```
+
+This CPU-only preset uses local SONIC weights and parity fixtures prepared
+with the [SONIC setup instructions](docs/SONIC-GGML.md). It builds
+`build/sonic-cpu/libmotionbricks.so` and runs backend discovery, API and
+one/two-thread parity checks. Set the runtime thread count explicitly; the
+[profiling harness](reference/profile_sonic_cpu.py) additionally pins the
+process to one or two distinct physical cores with `--cpus`.
+
+On the measured Ryzen 9 7900, an encoder+decoder pair takes about **0.93 ms
+on one core** and **0.62 ms on two**. The matched G1-only ONNX Runtime 1.22
+comparison takes 1.25 ms / 0.74 ms. Results describe this CPU and workload;
+these historical measurements used the single-variant AVX512 build.
+The `sonic-cpu-avx512` preset remains available to reproduce those experiments.
+See [CPU backend packaging and validation](docs/CPU-BACKENDS.md) for installation
+and the explicit `MOTIONBRICKS_CPU_ALL_VARIANTS=OFF` opt-out.
+See [measurements and methodology](docs/SONIC-CPU-PROFILE.md),
+[the ONNX comparison](docs/SONIC-ONNX-COMPARISON.md), and
+[machine-readable summaries](docs/benchmarks/sonic-cpu-2026-09-10.json).
+
 ## Current ABI
 
 Start with the [API selection guide](docs/API.md): choose stateless MotionBricks

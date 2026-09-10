@@ -10,8 +10,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 
+if(WIN32)
+    # Executables and dependent DLLs must share the build-tree directory.
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+# Keep installed libraries and backend modules relocatable together.
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path;@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN;$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()
+
 option(MOTIONBRICKS_BUILD_TESTS "Build motion-bricks.cpp tests" ON)
 option(MOTIONBRICKS_ENABLE_GGML "Use the pinned GGML submodule when present" ON)
+option(MOTIONBRICKS_CPU_ALL_VARIANTS "Build GGML CPU variants and select at runtime" ON)
 option(MOTIONBRICKS_ENABLE_VULKAN "Enable the GGML Vulkan backend" ON)
 option(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS "Run hardware-dependent Vulkan parity tests" OFF)
 option(MOTIONBRICKS_ENABLE_FUZZERS "Build libFuzzer targets" OFF)
@@ -79,6 +92,7 @@ add_library(motionbricks_shared SHARED ${MOTIONBRICKS_SOURCES})
 add_library(motionbricks::motionbricks ALIAS motionbricks_shared)
 set_target_properties(motionbricks_shared PROPERTIES
     OUTPUT_NAME motionbricks
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     EXPORT_NAME motionbricks
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES
@@ -113,18 +127,49 @@ if(MOTIONBRICKS_ENABLE_GGML)
         set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
         set(GGML_VULKAN ${MOTIONBRICKS_ENABLE_VULKAN} CACHE BOOL "" FORCE)
-        set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
-        add_subdirectory("${MOTIONBRICKS_GGML_SOURCE_DIR}"
-                         "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
-        # GGML is currently an internal build-tree dependency. Its installed
-        # runtime/package contract will be added with the first neural graph.
+        set(GGML_BACKEND_DL ${MOTIONBRICKS_CPU_ALL_VARIANTS} CACHE BOOL "" FORCE)
+        set(GGML_CPU_ALL_VARIANTS ${MOTIONBRICKS_CPU_ALL_VARIANTS} CACHE BOOL "" FORCE)
+        if(MOTIONBRICKS_CPU_ALL_VARIANTS)
+            set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+        endif()
+        # GGML's module targets require an output directory, including when
+        # only a library target (rather than an executable) is requested.
+        block()
+            set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+            add_subdirectory("${MOTIONBRICKS_GGML_SOURCE_DIR}"
+                             "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
+        endblock()
+        get_target_property(MOTIONBRICKS_GGML_HEADERS ggml PUBLIC_HEADER)
+        list(TRANSFORM MOTIONBRICKS_GGML_HEADERS PREPEND "${MOTIONBRICKS_GGML_SOURCE_DIR}/")
+        set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${MOTIONBRICKS_GGML_HEADERS}")
+        # Install explicitly: the vendored subdirectory is EXCLUDE_FROM_ALL.
+        # Modules live beside libggml so discovery also works for FFI callers.
+        set(MOTIONBRICKS_GGML_TARGETS ggml ggml-base ${GGML_AVAILABLE_BACKENDS})
+        set(MOTIONBRICKS_BACKEND_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        set(MOTIONBRICKS_BACKEND_INSTALL_DIRECTORY "${CMAKE_INSTALL_LIBDIR}")
+        if(WIN32)
+            set(MOTIONBRICKS_BACKEND_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+            set(MOTIONBRICKS_BACKEND_INSTALL_DIRECTORY "${CMAKE_INSTALL_BINDIR}")
+        endif()
+        foreach(backend IN LISTS MOTIONBRICKS_GGML_TARGETS)
+            if(TARGET ${backend})
+                set_target_properties(${backend} PROPERTIES
+                    LIBRARY_OUTPUT_DIRECTORY "${MOTIONBRICKS_BACKEND_OUTPUT_DIRECTORY}"
+                    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+                install(TARGETS ${backend}
+                    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                    LIBRARY DESTINATION ${MOTIONBRICKS_BACKEND_INSTALL_DIRECTORY}
+                    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+            endif()
+        endforeach()
         target_link_libraries(motionbricks_shared PRIVATE "$<BUILD_INTERFACE:ggml>")
         target_link_libraries(motionbricks_static PRIVATE "$<BUILD_INTERFACE:ggml>")
+        target_link_libraries(motionbricks_shared PRIVATE ${CMAKE_DL_LIBS})
+        target_link_libraries(motionbricks_static PRIVATE ${CMAKE_DL_LIBS})
         target_compile_definitions(motionbricks_shared PRIVATE MOTIONBRICKS_HAVE_GGML=1)
         target_compile_definitions(motionbricks_static PRIVATE MOTIONBRICKS_HAVE_GGML=1)
         if(MOTIONBRICKS_ENABLE_VULKAN AND TARGET ggml-vulkan)
-            target_link_libraries(motionbricks_shared PRIVATE "$<BUILD_INTERFACE:ggml-vulkan>")
-            target_link_libraries(motionbricks_static PRIVATE "$<BUILD_INTERFACE:ggml-vulkan>")
             target_compile_definitions(motionbricks_shared PRIVATE MOTIONBRICKS_HAVE_VULKAN=1)
             target_compile_definitions(motionbricks_static PRIVATE MOTIONBRICKS_HAVE_VULKAN=1)
         endif()
@@ -172,6 +217,14 @@ set_target_properties(motionbricks-parity PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 include(CTest)
+if(TARGET ggml AND NOT GGML_BACKEND_DL AND GGML_AVX512 AND UNIX AND NOT APPLE)
+    # Explicit opt-in diagnostic target; never installed or linked into runtime.
+    add_library(motionbricks-sonic-cpu-experiment SHARED EXCLUDE_FROM_ALL
+        reference/sonic_cpu_experiment.cpp)
+    target_link_libraries(motionbricks-sonic-cpu-experiment PRIVATE ggml ${CMAKE_DL_LIBS})
+    target_compile_options(motionbricks-sonic-cpu-experiment PRIVATE
+        -mavx512f -mavx512dq -mavx512vl -mf16c -mfma)
+endif()
 add_executable(motionbricks-sonic-parity src/sonic_parity.cpp)
 target_link_libraries(motionbricks-sonic-parity PRIVATE motionbricks::motionbricks)
 set_target_properties(motionbricks-sonic-parity PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

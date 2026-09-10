@@ -60,7 +60,9 @@ MB_API mb_status mb_runtime_options_set_threads(mb_runtime_options * value, uint
                                                 char * error, uint64_t error_capacity);
 MB_API mb_status mb_runtime_options_get_threads(const mb_runtime_options * value, uint32_t * output,
                                                 char * error, uint64_t error_capacity);
-/* Passing NULL clears the override. The returned string is borrowed. */
+/* Overrides backend discovery before the first model load in this process.
+ * Passing NULL clears the override. The returned string is borrowed.
+ * Successfully loaded backends are shared by subsequent model loads. */
 MB_API mb_status mb_runtime_options_set_backend_directory(mb_runtime_options * value,
                                                           const char * directory,
                                                           char * error, uint64_t error_capacity);

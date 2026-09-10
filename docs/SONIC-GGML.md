@@ -8,6 +8,14 @@ demo. Optional native **MuJoCo 3.12.0** supplies simulation, not inference.
 The upstream Docker reference remains pinned to 3.3.5; see the
 [upgrade notes and verification](MUJOCO-UPGRADE.md).
 
+For inference latency on one and two physical CPU cores, build comparisons,
+and optimization priorities, see [the CPU profile](SONIC-CPU-PROFILE.md).
+Default builds package GGML CPU variants and select a compatible backend at
+runtime. Use `cmake --preset sonic-cpu` and `cmake --build --preset sonic-cpu`
+for CPU-only F32 inference with `-O3` and profiling symbols. Local model/fixture
+assets are required for parity tests. See [backend packaging](CPU-BACKENDS.md)
+and [CPU profiling results](SONIC-CPU-PROFILE.md).
+
 ## Scope and parity
 
 The converted file contains 14,415,453 F32 parameters, approximately 58 MB.

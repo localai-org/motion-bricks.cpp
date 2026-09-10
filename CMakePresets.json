@@ -19,6 +19,54 @@
       }
     },
     {
+      "name": "sonic-cpu",
+      "displayName": "SONIC CPU: runtime ISA selection, O3, profiling symbols",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sonic-cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "MOTIONBRICKS_ENABLE_GGML": "ON",
+        "MOTIONBRICKS_ENABLE_VULKAN": "OFF",
+        "MOTIONBRICKS_ENABLE_PHYSICS": "OFF",
+        "MOTIONBRICKS_DOWNLOAD_MODELS": "OFF",
+        "MOTIONBRICKS_BUILD_TESTS": "ON",
+        "BUILD_TESTING": "ON",
+        "GGML_OPENMP": "ON",
+        "MOTIONBRICKS_CPU_ALL_VARIANTS": "ON"
+      }
+    },
+    {
+      "name": "sonic-cpu-avx512",
+      "displayName": "SONIC CPU: AVX512, O3, profiling symbols",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sonic-cpu-avx512-o3",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "MOTIONBRICKS_ENABLE_GGML": "ON",
+        "MOTIONBRICKS_ENABLE_VULKAN": "OFF",
+        "MOTIONBRICKS_ENABLE_PHYSICS": "OFF",
+        "MOTIONBRICKS_DOWNLOAD_MODELS": "OFF",
+        "MOTIONBRICKS_BUILD_TESTS": "ON",
+        "BUILD_TESTING": "ON",
+        "GGML_OPENMP": "ON",
+        "GGML_AVX": "ON",
+        "GGML_AVX2": "ON",
+        "GGML_FMA": "ON",
+        "GGML_F16C": "ON",
+        "GGML_SSE42": "ON",
+        "GGML_BMI2": "ON",
+        "GGML_AVX512": "ON",
+        "GGML_AVX512_BF16": "OFF",
+        "GGML_AVX512_VBMI": "OFF",
+        "GGML_AVX512_VNNI": "OFF",
+        "MOTIONBRICKS_CPU_ALL_VARIANTS": "OFF"
+      }
+    },
+    {
       "name": "asan-ubsan",
       "inherits": "debug",
       "binaryDir": "${sourceDir}/build/asan-ubsan",
@@ -31,11 +79,41 @@
     }
   ],
   "buildPresets": [
+    {"name": "sonic-cpu", "configurePreset": "sonic-cpu", "jobs": 2},
     {"name": "debug", "configurePreset": "debug"},
     {"name": "release", "configurePreset": "release"},
+    {"name": "sonic-cpu-avx512", "configurePreset": "sonic-cpu-avx512", "jobs": 2, "targets": ["motionbricks-sonic-parity", "motionbricks-sonic-api-test"]},
     {"name": "asan-ubsan", "configurePreset": "asan-ubsan"}
   ],
   "testPresets": [
+    {
+      "name": "sonic-cpu",
+      "configurePreset": "sonic-cpu",
+      "environment": {
+        "OMP_THREAD_LIMIT": "2",
+        "OMP_DYNAMIC": "FALSE"
+      },
+      "filter": {
+        "include": {
+          "name": "^motionbricks-(sonic-(api|api-model|parity-cpu|parity-cpu-2)|cpu-backend-loading)$"
+        }
+      },
+      "execution": {
+        "jobs": 1,
+        "noTestsAction": "error"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sonic-cpu-avx512",
+      "configurePreset": "sonic-cpu-avx512",
+      "environment": {"OMP_THREAD_LIMIT": "2", "OMP_DYNAMIC": "FALSE"},
+      "filter": {"include": {"name": "^motionbricks-sonic-(api|api-model|parity-cpu|parity-cpu-2)$"}},
+      "execution": {"jobs": 1, "noTestsAction": "error"},
+      "output": {"outputOnFailure": true}
+    },
     {
       "name": "debug",
       "configurePreset": "debug",

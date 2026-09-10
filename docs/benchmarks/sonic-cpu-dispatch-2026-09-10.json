@@ -1,0 +1,385 @@
+{
+  "date": "2026-09-10",
+  "cpu": "AMD Ryzen 9 7900",
+  "compiler": "GCC 15.2.0",
+  "python": "3.13.15",
+  "ggml_commit": "8c63e70982c95ceb862e3a1073a2c1beef75d60a",
+  "model_sha256": "c3fe437837debffbd44fc85190330a255fc8fb3468c190113c6feae28a2d64e0",
+  "fixture_sha256": "6321db83d3ce6ae8d9a541a861e2dd2b39fdab1e6d9a385dc5e96c4f68ec64db",
+  "method": {
+    "iterations": 2205,
+    "warmup": 100,
+    "repetitions": 3,
+    "affinity": {
+      "1": [
+        2
+      ],
+      "2": [
+        2,
+        3
+      ]
+    },
+    "precision": "F32",
+    "optimization": "-O3 -g -DNDEBUG",
+    "measurement": "public C ABI via ctypes, encoder plus decoder; model load and backend selection excluded",
+    "runtime_backend": "ggml-cpu-zen4",
+    "single_backend": "ggml-cpu, AVX512 F/CD/VL/DQ/BW; VBMI/VNNI/BF16 disabled",
+    "caveat": "No exclusive cores or frequency lock; burst timings, not a real-time guarantee"
+  },
+  "summary": [
+    {
+      "configuration": "runtime-zen4",
+      "cores": 1,
+      "median_run_mean_ms": 0.924026693877551,
+      "median_run_p95_ms": 0.995893
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 2,
+      "median_run_mean_ms": 0.6158912244897959,
+      "median_run_p95_ms": 0.680046
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 1,
+      "median_run_mean_ms": 0.9250639328798186,
+      "median_run_p95_ms": 1.003137
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 2,
+      "median_run_mean_ms": 0.6170552380952381,
+      "median_run_p95_ms": 0.679285
+    }
+  ],
+  "runs": [
+    {
+      "configuration": "runtime-zen4",
+      "cores": 1,
+      "repetition": 1,
+      "encoder": {
+        "mean_ms": 0.26565964988662133,
+        "p50_ms": 0.262284,
+        "p95_ms": 0.289686,
+        "p99_ms": 0.315165,
+        "max_ms": 0.373558
+      },
+      "decoder": {
+        "mean_ms": 0.6565882698412698,
+        "p50_ms": 0.647885,
+        "p95_ms": 0.711136,
+        "p99_ms": 0.746213,
+        "max_ms": 0.84827
+      },
+      "pair": {
+        "mean_ms": 0.924026693877551,
+        "p50_ms": 0.913063,
+        "p95_ms": 0.995893,
+        "p99_ms": 1.046921,
+        "max_ms": 1.207319
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 2,
+      "repetition": 1,
+      "encoder": {
+        "mean_ms": 0.18854945714285715,
+        "p50_ms": 0.185586,
+        "p95_ms": 0.207449,
+        "p99_ms": 0.227617,
+        "max_ms": 0.257334
+      },
+      "decoder": {
+        "mean_ms": 0.43124989614512477,
+        "p50_ms": 0.424315,
+        "p95_ms": 0.477538,
+        "p99_ms": 0.507084,
+        "max_ms": 0.610783
+      },
+      "pair": {
+        "mean_ms": 0.6219336258503401,
+        "p50_ms": 0.612186,
+        "p95_ms": 0.684635,
+        "p99_ms": 0.732377,
+        "max_ms": 0.870562
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 1,
+      "repetition": 1,
+      "encoder": {
+        "mean_ms": 0.26809988616780045,
+        "p50_ms": 0.264297,
+        "p95_ms": 0.292832,
+        "p99_ms": 0.32268,
+        "max_ms": 0.434345
+      },
+      "decoder": {
+        "mean_ms": 0.6525632439909297,
+        "p50_ms": 0.644318,
+        "p95_ms": 0.705946,
+        "p99_ms": 0.754199,
+        "max_ms": 0.906461
+      },
+      "pair": {
+        "mean_ms": 0.9226378390022676,
+        "p50_ms": 0.910849,
+        "p95_ms": 0.996474,
+        "p99_ms": 1.062521,
+        "max_ms": 1.343321
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 2,
+      "repetition": 1,
+      "encoder": {
+        "mean_ms": 0.1854752970521542,
+        "p50_ms": 0.182751,
+        "p95_ms": 0.204223,
+        "p99_ms": 0.21866,
+        "max_ms": 0.246814
+      },
+      "decoder": {
+        "mean_ms": 0.42980746122448976,
+        "p50_ms": 0.424616,
+        "p95_ms": 0.474231,
+        "p99_ms": 0.497065,
+        "max_ms": 0.558232
+      },
+      "pair": {
+        "mean_ms": 0.6170552380952381,
+        "p50_ms": 0.609331,
+        "p95_ms": 0.679285,
+        "p99_ms": 0.709362,
+        "max_ms": 0.786771
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 1,
+      "repetition": 2,
+      "encoder": {
+        "mean_ms": 0.26821657505668933,
+        "p50_ms": 0.264889,
+        "p95_ms": 0.295237,
+        "p99_ms": 0.315786,
+        "max_ms": 0.360282
+      },
+      "decoder": {
+        "mean_ms": 0.6555064453514738,
+        "p50_ms": 0.648005,
+        "p95_ms": 0.710736,
+        "p99_ms": 0.764819,
+        "max_ms": 0.839001
+      },
+      "pair": {
+        "mean_ms": 0.926097387755102,
+        "p50_ms": 0.915718,
+        "p95_ms": 1.006333,
+        "p99_ms": 1.068833,
+        "max_ms": 1.154156
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 2,
+      "repetition": 2,
+      "encoder": {
+        "mean_ms": 0.18677265578231292,
+        "p50_ms": 0.182621,
+        "p95_ms": 0.21368,
+        "p99_ms": 0.236394,
+        "max_ms": 0.309765
+      },
+      "decoder": {
+        "mean_ms": 0.43139117505668934,
+        "p50_ms": 0.420889,
+        "p95_ms": 0.490262,
+        "p99_ms": 0.549836,
+        "max_ms": 2.260703
+      },
+      "pair": {
+        "mean_ms": 0.6200121510204082,
+        "p50_ms": 0.604882,
+        "p95_ms": 0.703952,
+        "p99_ms": 0.786531,
+        "max_ms": 2.504601
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 1,
+      "repetition": 2,
+      "encoder": {
+        "mean_ms": 0.26725246530612246,
+        "p50_ms": 0.265299,
+        "p95_ms": 0.293474,
+        "p99_ms": 0.313402,
+        "max_ms": 0.370502
+      },
+      "decoder": {
+        "mean_ms": 0.6557515614512472,
+        "p50_ms": 0.650299,
+        "p95_ms": 0.709192,
+        "p99_ms": 0.738679,
+        "max_ms": 0.840685
+      },
+      "pair": {
+        "mean_ms": 0.9253200421768707,
+        "p50_ms": 0.918384,
+        "p95_ms": 0.999029,
+        "p99_ms": 1.043966,
+        "max_ms": 1.134529
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 2,
+      "repetition": 2,
+      "encoder": {
+        "mean_ms": 0.18438555011337868,
+        "p50_ms": 0.181218,
+        "p95_ms": 0.203792,
+        "p99_ms": 0.219492,
+        "max_ms": 0.282994
+      },
+      "decoder": {
+        "mean_ms": 0.4297408462585034,
+        "p50_ms": 0.422832,
+        "p95_ms": 0.474792,
+        "p99_ms": 0.507825,
+        "max_ms": 0.674736
+      },
+      "pair": {
+        "mean_ms": 0.6158912244897959,
+        "p50_ms": 0.605894,
+        "p95_ms": 0.680046,
+        "p99_ms": 0.724682,
+        "max_ms": 0.925478
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 1,
+      "repetition": 3,
+      "encoder": {
+        "mean_ms": 0.26445376825396827,
+        "p50_ms": 0.262674,
+        "p95_ms": 0.29182,
+        "p99_ms": 0.318962,
+        "max_ms": 0.351635
+      },
+      "decoder": {
+        "mean_ms": 0.647414728798186,
+        "p50_ms": 0.641462,
+        "p95_ms": 0.706297,
+        "p99_ms": 0.771001,
+        "max_ms": 0.909798
+      },
+      "pair": {
+        "mean_ms": 0.9138063410430839,
+        "p50_ms": 0.908435,
+        "p95_ms": 0.993409,
+        "p99_ms": 1.084664,
+        "max_ms": 1.195386
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "runtime-zen4",
+      "cores": 2,
+      "repetition": 3,
+      "encoder": {
+        "mean_ms": 0.18447977868480725,
+        "p50_ms": 0.181879,
+        "p95_ms": 0.202639,
+        "p99_ms": 0.218089,
+        "max_ms": 0.240692
+      },
+      "decoder": {
+        "mean_ms": 0.4280542757369615,
+        "p50_ms": 0.422592,
+        "p95_ms": 0.471054,
+        "p99_ms": 0.498227,
+        "max_ms": 0.545638
+      },
+      "pair": {
+        "mean_ms": 0.6145512077097505,
+        "p50_ms": 0.606625,
+        "p95_ms": 0.674816,
+        "p99_ms": 0.712008,
+        "max_ms": 0.766773
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 1,
+      "repetition": 3,
+      "encoder": {
+        "mean_ms": 0.26389368253968254,
+        "p50_ms": 0.262204,
+        "p95_ms": 0.29131,
+        "p99_ms": 0.320826,
+        "max_ms": 0.376814
+      },
+      "decoder": {
+        "mean_ms": 0.6591688888888889,
+        "p50_ms": 0.653245,
+        "p95_ms": 0.713711,
+        "p99_ms": 0.76018,
+        "max_ms": 0.892574
+      },
+      "pair": {
+        "mean_ms": 0.9250639328798186,
+        "p50_ms": 0.917572,
+        "p95_ms": 1.003137,
+        "p99_ms": 1.068993,
+        "max_ms": 1.271502
+      },
+      "pairs_over_20ms": 0
+    },
+    {
+      "configuration": "single-avx512",
+      "cores": 2,
+      "repetition": 3,
+      "encoder": {
+        "mean_ms": 0.1841657931972789,
+        "p50_ms": 0.181238,
+        "p95_ms": 0.202259,
+        "p99_ms": 0.216947,
+        "max_ms": 0.250772
+      },
+      "decoder": {
+        "mean_ms": 0.42998798503401364,
+        "p50_ms": 0.424025,
+        "p95_ms": 0.470764,
+        "p99_ms": 0.497105,
+        "max_ms": 0.548283
+      },
+      "pair": {
+        "mean_ms": 0.6159258095238095,
+        "p50_ms": 0.607146,
+        "p95_ms": 0.672863,
+        "p99_ms": 0.705625,
+        "max_ms": 0.793104
+      },
+      "pairs_over_20ms": 0
+    }
+  ],
+  "backend_libraries_sha256": {
+    "runtime-zen4": "1f270fc49aa3bc87961cb629b087d8193e9dad20ea743bd244592e0debe5c2c3",
+    "single-avx512": "b1fdfd1f099d810a22d1407edcf88d940cc823e65dd4b966b407928a7a60257e"
+  }
+}
