@@ -1,5 +1,3 @@
-//go:build linux || darwin || freebsd
-
 // Package motionbricks provides a PureGo wrapper around the stable opaque C ABI.
 package motionbricks
 
@@ -66,7 +64,7 @@ type Library struct {
 }
 
 func Open(path string) (*Library, error) {
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := openLibrary(path)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +120,7 @@ func (l *Library) Close() error {
 	if l == nil || l.handle == 0 {
 		return nil
 	}
-	err := purego.Dlclose(l.handle)
+	err := closeLibrary(l.handle)
 	l.handle = 0
 	return err
 }
