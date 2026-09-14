@@ -1,5 +1,3 @@
-//go:build linux || darwin || freebsd
-
 package motionbricks
 
 import (
@@ -87,7 +85,7 @@ func OpenPhysics(library, model, scene, config string, device Device) (*Physics,
 		{"mb_physics_collision_count", &p.collisionCount}, {"mb_physics_collision_shape", &p.collisionShape},
 		{"mb_physics_collision_triangles", &p.collisionTriangles}, {"mb_physics_collision_transforms", &p.collisionTransforms},
 	} {
-		address, e := purego.Dlsym(l.handle, entry.name)
+		address, e := lookupSymbol(l.handle, entry.name)
 		if e != nil {
 			return nil, e
 		}
