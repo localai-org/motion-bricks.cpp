@@ -102,8 +102,15 @@ target_compile_definitions(motionbricks_shared PRIVATE MOTIONBRICKS_BUILD MOTION
 
 add_library(motionbricks_static STATIC ${MOTIONBRICKS_SOURCES})
 add_library(motionbricks::motionbricks_static ALIAS motionbricks_static)
+if(WIN32)
+    # Import libraries and static libraries share the .lib extension, so the
+    # shared and static targets cannot also share an output name.
+    set(MOTIONBRICKS_STATIC_OUTPUT_NAME motionbricks_static)
+else()
+    set(MOTIONBRICKS_STATIC_OUTPUT_NAME motionbricks)
+endif()
 set_target_properties(motionbricks_static PROPERTIES
-    OUTPUT_NAME motionbricks
+    OUTPUT_NAME ${MOTIONBRICKS_STATIC_OUTPUT_NAME}
     EXPORT_NAME motionbricks_static)
 target_compile_definitions(motionbricks_static PRIVATE MOTIONBRICKS_BUILD)
 

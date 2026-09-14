@@ -1,5 +1,3 @@
-//go:build linux || darwin || freebsd
-
 package motionbricks
 
 import (
@@ -27,11 +25,11 @@ func TestOpaqueABIRoundTrip(t *testing.T) {
 		t.Skip("set MOTIONBRICKS_LIB to the motion-bricks.cpp shared library")
 	}
 
-	handle, err := purego.Dlopen(library, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	handle, err := openLibrary(library)
 	if err != nil {
 		t.Fatalf("dlopen %s: %v", library, err)
 	}
-	defer purego.Dlclose(handle)
+	defer closeLibrary(handle)
 
 	var version func() uint32
 	var optionsCreate func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
