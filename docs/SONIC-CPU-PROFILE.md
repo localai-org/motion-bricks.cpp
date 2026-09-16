@@ -214,6 +214,27 @@ keep the explicit AVX512/AVX2/FMA ISA options. The measured build retains
 symbols to support profiling. Reports, parity logs and before/after assembly
 are in `generated/sonic/ggml/cpu-profile/o3/` and the earlier `avx512/` folder.
 
+## Llamafile SGEMM follow-up
+
+Enabling GGML's Llamafile CPU matrix kernels benefits batched SONIC calls. On
+the Ryzen 9 7900, a fused batch of four encoder/decoder pairs fell from 2.708
+to 2.548 ms on one core (-5.9%) and from 1.428 to 1.315 ms on two cores (-7.9%).
+The two-core result was noisier than the one-core result: individual reductions
+were 2.2% and 13.6%.
+
+Batch one remains a matrix-vector workload, which Llamafile deliberately
+declines. A small vendored GGML guard keeps that rejected dispatch out of the
+hot path. In matched alternating runs, the resulting build reduced batch-one
+pair latency from 1.094 to 1.038 ms (-5.1%); that smaller improvement appears
+to come from the changed fallback layout rather than the tinyBLAS kernel.
+
+The expanded CPU harness accepts `--batch`; allocation and fixture assembly
+remain outside the timed interval. SONIC API validation passes, including
+exact batch encoder tokens and decoder agreement within the existing tolerance,
+and the full 2,205-sample batch-one parity suite still passes on one and two
+cores. Raw measurements are in
+`benchmarks/llamafile-cpu-2026-09-16.json`.
+
 ## Decoder-kernel and reduced-storage experiments
 
 An optional [diagnostic interposer](../reference/SONIC-CPU-EXPERIMENTS.md)

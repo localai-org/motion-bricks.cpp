@@ -36,6 +36,9 @@ ctest --preset sonic-cpu
 cmake --install build/sonic-cpu --prefix "$PWD/dist/motionbricks"
 ```
 
+MotionBricks enables GGML's Llamafile CPU matrix kernels by default. Disable
+them for a control build with `-DMOTIONBRICKS_ENABLE_LLAMAFILE=OFF`.
+
 This preset uses local SONIC weights and fixtures and never downloads them.
 The normal `debug` and `release` presets also enable runtime selection;
 Release uses CMake's optimized compiler flags (`-O3` with GCC/Clang), while

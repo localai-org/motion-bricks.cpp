@@ -24,6 +24,7 @@ def main():
     p.add_argument('--model', type=Path, required=True)
     p.add_argument('--fixture', type=Path, required=True)
     p.add_argument('--cpus', required=True, help='One or two logical CPU IDs on distinct physical cores')
+    p.add_argument('--batch', type=int, default=1, help='Independent SONIC requests per API call')
     p.add_argument('--iterations', type=int, default=6615)
     p.add_argument('--warmup', type=int, default=100)
     p.add_argument('--period-ms', type=float, default=0, help='0 for burst; 20 for 50 Hz arrivals')
@@ -40,7 +41,8 @@ def main():
                               for name in ('physical_package_id', 'core_id')))
     if len(set(topology)) != len(cpus):
         p.error('select distinct physical cores, not SMT siblings')
-    if args.iterations < 1 or args.warmup < 0 or not math.isfinite(args.period_ms) or args.period_ms < 0:
+    if (args.iterations < 1 or args.warmup < 0 or not 1 <= args.batch <= 64
+            or not math.isfinite(args.period_ms) or args.period_ms < 0):
         p.error('invalid iteration/warmup/period')
     os.sched_setaffinity(0, cpus)
     os.environ.update(OMP_NUM_THREADS=str(len(cpus)), OMP_THREAD_LIMIT=str(len(cpus)),
@@ -58,7 +60,19 @@ def main():
     enc_type, dec_type = c.c_float * 1762, c.c_float * 994
     samples = [(enc_type.from_buffer_copy(blob, 12 + i * stride),
                 dec_type.from_buffer_copy(blob, 12 + i * stride + 1762 * 4)) for i in range(count)]
-    tokens, actions = (c.c_float * 64)(), (c.c_float * 29)()
+    if args.batch > 1:
+        enc_batch_type = c.c_float * (1762 * args.batch)
+        dec_batch_type = c.c_float * (994 * args.batch)
+        batched = []
+        for i in range(count):
+            enc_batch, dec_batch = enc_batch_type(), dec_batch_type()
+            for item in range(args.batch):
+                enc, dec = samples[(i * args.batch + item) % count]
+                c.memmove(c.byref(enc_batch, item * 1762 * c.sizeof(c.c_float)), enc, c.sizeof(enc))
+                c.memmove(c.byref(dec_batch, item * 994 * c.sizeof(c.c_float)), dec, c.sizeof(dec))
+            batched.append((enc_batch, dec_batch))
+        samples = batched
+    tokens, actions = (c.c_float * (64 * args.batch))(), (c.c_float * (29 * args.batch))()
     lib = c.CDLL(str(args.library.resolve()))
     error = c.create_string_buffer(1024)
     signatures = {
@@ -68,6 +82,10 @@ def main():
         'mb_sonic_load': [c.c_char_p, c.c_void_p, c.POINTER(c.c_void_p), c.c_void_p, c.c_uint64],
         'mb_sonic_encode': [c.c_void_p, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64],
         'mb_sonic_decode': [c.c_void_p, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64],
+        'mb_sonic_encode_batch': [c.c_void_p, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64, c.c_uint32,
+                                  c.c_void_p, c.c_uint64],
+        'mb_sonic_decode_batch': [c.c_void_p, c.c_void_p, c.c_uint64, c.c_void_p, c.c_uint64, c.c_uint32,
+                                  c.c_void_p, c.c_uint64],
     }
     for name, signature in signatures.items():
         getattr(lib, name).argtypes = signature
@@ -83,7 +101,8 @@ def main():
     options, model = c.c_void_p(), c.c_void_p()
     enc_ns, dec_ns, pair_ns, start_lateness_ns = [], [], [], []
     deadline_misses = 0
-    encode, decode = lib.mb_sonic_encode, lib.mb_sonic_decode
+    encode = lib.mb_sonic_encode if args.batch == 1 else lib.mb_sonic_encode_batch
+    decode = lib.mb_sonic_decode if args.batch == 1 else lib.mb_sonic_decode_batch
     now = time.perf_counter_ns
     try:
         check(lib.mb_runtime_options_create(c.byref(options), error, len(error)))
@@ -101,11 +120,21 @@ def main():
                     time.sleep(remaining)
             enc, dec = samples[i % count]
             t0 = now()
-            check(encode(model, enc, 1762, tokens, 64, error, len(error)))
+            if args.batch == 1:
+                check(encode(model, enc, 1762, tokens, 64, error, len(error)))
+            else:
+                check(encode(model, enc, 1762 * args.batch, tokens, 64 * args.batch,
+                             args.batch, error, len(error)))
             t1 = now()
-            c.memmove(dec, tokens, c.sizeof(tokens))
+            for item in range(args.batch):
+                c.memmove(c.byref(dec, item * 994 * c.sizeof(c.c_float)),
+                          c.byref(tokens, item * 64 * c.sizeof(c.c_float)), 64 * c.sizeof(c.c_float))
             t2 = now()
-            check(decode(model, dec, 994, actions, 29, error, len(error)))
+            if args.batch == 1:
+                check(decode(model, dec, 994, actions, 29, error, len(error)))
+            else:
+                check(decode(model, dec, 994 * args.batch, actions, 29 * args.batch,
+                             args.batch, error, len(error)))
             t3 = now()
             if i >= args.warmup:
                 enc_ns.append(t1 - t0)
@@ -140,8 +169,9 @@ def main():
                   openmp_environment={name: os.getenv(name) for name in
                                       ('OMP_NUM_THREADS', 'OMP_THREAD_LIMIT', 'OMP_DYNAMIC',
                                        'OMP_WAIT_POLICY', 'GOMP_SPINCOUNT', 'OMP_PROC_BIND', 'OMP_PLACES')},
-                  iterations=args.iterations, warmup=args.warmup, fixture_samples=count,
+                  batch=args.batch, iterations=args.iterations, warmup=args.warmup, fixture_samples=count,
                   period_ms=args.period_ms, encoder=stats(enc_ns), decoder=stats(dec_ns), pair=stats(pair_ns),
+                  aggregate_pairs_per_second=args.batch * len(pair_ns) * 1e9 / sum(pair_ns),
                   wall_seconds=wall_ns / 1e9,
                   cpu_seconds=(usage_end.ru_utime + usage_end.ru_stime - usage_start.ru_utime - usage_start.ru_stime),
                   voluntary_context_switches=usage_end.ru_nvcsw - usage_start.ru_nvcsw,

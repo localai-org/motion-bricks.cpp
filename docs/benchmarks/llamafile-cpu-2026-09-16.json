@@ -1,0 +1,67 @@
+{
+  "date": "2026-09-16",
+  "host": "AMD Ryzen 9 7900",
+  "ggml_revision": "8c63e70982c95ceb862e3a1073a2c1beef75d60a",
+  "method": "Immediate alternating burst measurements; physical CPUs 2 and 2,3 unless noted",
+  "motionbricks_fixed_10_tokens_40_frames": [
+    {
+      "weights": "F32",
+      "cores": 1,
+      "baseline_mean_ms_runs": [87.278, 89.278],
+      "llamafile_mean_ms_runs": [58.127, 58.244],
+      "baseline_pose_ms_runs": [54.614, 54.805],
+      "llamafile_pose_ms_runs": [34.093, 34.918]
+    },
+    {
+      "weights": "F32",
+      "cores": 2,
+      "baseline_mean_ms_runs": [48.201, 47.264],
+      "llamafile_mean_ms_runs": [33.713, 33.779],
+      "baseline_pose_ms_runs": [28.943, 28.944],
+      "llamafile_pose_ms_runs": [19.875, 20.169]
+    },
+    {
+      "weights": "pose BF16",
+      "cores": 1,
+      "baseline_mean_ms": 62.813,
+      "llamafile_mean_ms": 52.757,
+      "baseline_pose_ms": 29.739,
+      "llamafile_pose_ms": 26.061
+    },
+    {
+      "weights": "pose BF16",
+      "cores": 2,
+      "baseline_mean_ms": 35.046,
+      "llamafile_mean_ms": 28.283,
+      "baseline_pose_ms": 15.843,
+      "llamafile_pose_ms": 14.871
+    }
+  ],
+  "sonic": {
+    "batch_one_one_core": {
+      "iterations_per_run": 2205,
+      "baseline_pair_mean_ms_runs": [1.068762, 1.118749],
+      "llamafile_pair_mean_ms_runs": [1.020766, 1.056091]
+    },
+    "batch_four": [
+      {
+        "cores": 1,
+        "iterations": 1000,
+        "baseline_pair_mean_ms_runs": [2.719478, 2.696547],
+        "llamafile_pair_mean_ms_runs": [2.555920, 2.540981]
+      },
+      {
+        "cores": 2,
+        "iterations": 1000,
+        "baseline_pair_mean_ms_runs": [1.430881, 1.425153],
+        "llamafile_pair_mean_ms_runs": [1.236447, 1.393911]
+      }
+    ]
+  },
+  "validation": {
+    "motionbricks_pose_root_decoder_parity": true,
+    "sonic_api_batch_validation": true,
+    "sonic_full_fixture_one_core": true,
+    "sonic_full_fixture_two_core": true
+  }
+}

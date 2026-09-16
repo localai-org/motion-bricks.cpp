@@ -184,3 +184,26 @@ complexity than the retained changes.
 
 Raw baseline and post-change results are stored in
 `docs/benchmarks/motionbricks-cpu-2026-09-16.json`.
+
+## Llamafile skinny-GEMM follow-up
+
+GGML's Llamafile CPU matrix kernels were subsequently enabled. Unlike the
+generic per-output dot-product path, its tinyBLAS kernel blocks several of the
+planner's 6--16 token columns together. Immediate alternating measurements for
+the fixed 10-token/40-frame workload were:
+
+| Weights | Cores | Generic GGML | Llamafile | Change |
+|---|---:|---:|---:|---:|
+| F32 | 1 | 88.3 ms | 58.2 ms | -34.1% |
+| F32 | 2 | 47.7 ms | 33.7 ms | -29.3% |
+| Pose BF16 | 1 | 62.8 ms | 52.8 ms | -16.0% |
+| Pose BF16 | 2 | 35.0 ms | 28.3 ms | -19.3% |
+
+For F32, pose planning fell from 54.7 to 34.5 ms on one core and from
+28.9 to 20.0 ms on two. Root planning and VQ decoding also improved. All
+existing CPU pose, root and decoder parity fixtures pass. The BF16 quality
+limitations described above remain unchanged; Llamafile does not make that
+experimental weight format parity-preserving.
+
+The detailed measurements, including the SONIC batch comparison, are stored in
+`docs/benchmarks/llamafile-cpu-2026-09-16.json`.
