@@ -176,6 +176,60 @@
       }
     }
   },
+  "pose_bf16_experiment": {
+    "source_revision": "ba51ed1 plus uncommitted BF16 experiment",
+    "conversion": "pose 2D matrix weights BF16; embeddings, norms, biases, activations, root and decoder F32",
+    "pose_component_bytes": {"f32": 546369984, "bf16": 273601984},
+    "automatic_11_tokens_44_frames": [
+      {
+        "cpus": [0],
+        "threads": 1,
+        "warmup_rounds": 5,
+        "measured_rounds": 30,
+        "f32_mean_ms": 100.732,
+        "bf16_mean_ms": 72.868,
+        "f32_pose_mean_ms": 59.172,
+        "bf16_pose_mean_ms": 32.470
+      },
+      {
+        "cpus": [0, 1],
+        "threads": 2,
+        "warmup_rounds": 5,
+        "measured_rounds": 30,
+        "f32_mean_ms": 60.304,
+        "bf16_mean_ms": 45.528,
+        "f32_pose_mean_ms": 35.974,
+        "bf16_pose_mean_ms": 19.622
+      }
+    ],
+    "fixed_10_tokens_40_frames": [
+      {"threads": 1, "f32_mean_ms": 90.005, "bf16_mean_ms": 64.145},
+      {"threads": 2, "f32_mean_ms": 54.897, "bf16_mean_ms": 40.377}
+    ],
+    "vulkan": {
+      "rtx_5070_ti": {
+        "reported_bf16_support": true,
+        "cooperative_matrix_paths_disabled": true,
+        "batch_one": {"f32_mean_ms": 12.7390644, "bf16_mean_ms": 13.3050405},
+        "fused_batch_four": {"f32_mean_ms": 27.36912105, "bf16_mean_ms": 27.78710035}
+      },
+      "ryzen_7900_integrated": {
+        "reported_bf16_support": false,
+        "batch_one": {"f32_mean_ms": 59.45169835, "bf16_mean_ms": 50.2593771},
+        "fused_batch_four": {"f32_mean_ms": 141.50945775, "bf16_mean_ms": 152.7391444},
+        "four_serial": {"f32_mean_ms": 236.47318415, "bf16_mean_ms": 199.772405}
+      }
+    },
+    "parity": {
+      "pose_fixture_max_abs": 7.08705,
+      "pose_fixture_argmax_mismatches": 2,
+      "pose_fixture_argmax_comparisons": 88,
+      "full_plan_frames": 44,
+      "full_plan_root_max_abs_m": 0.0124726,
+      "full_plan_rotation_component_max_abs": 0.0827364,
+      "accepted_as_default": false
+    }
+  },
   "fixed_duration_one_core": [
     {"tokens": 6, "frames": 24, "request_mean_ms": 63.083, "root_mean_ms": 17.389},
     {"tokens": 11, "frames": 44, "request_mean_ms": 114.094, "root_mean_ms": 42.602}

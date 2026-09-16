@@ -44,10 +44,13 @@ int main(int argc, char ** argv) {
     mb_model model;
     std::string reason;
     mb_runtime_options options;
-    const bool vulkan = argc == 2 && std::string_view(argv[1]) == "vulkan";
+    const bool vulkan = (argc >= 2 && std::string_view(argv[1]) == "vulkan") ||
+                        (argc >= 3 && std::string_view(argv[2]) == "vulkan");
+    const std::string_view bundle = argc >= 2 && std::string_view(argv[1]) != "vulkan"
+        ? std::string_view(argv[1]) : std::string_view(MOTIONBRICKS_REFERENCE_BUNDLE);
     options.device = vulkan ? MB_DEVICE_VULKAN : MB_DEVICE_CPU;
     auto status = motionbricks::detail::load_model_bundle(
-        MOTIONBRICKS_REFERENCE_BUNDLE, &options, model, reason);
+        bundle, &options, model, reason);
     if (status != MB_OK) {
         std::cerr << reason << '\n';
         return 1;

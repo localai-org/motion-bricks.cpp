@@ -133,8 +133,51 @@ benchmark above shows that opportunity does not pay on this particular CPU.
 - Output order matches input order. Every output is NULL on C API failure.
 - Calls sharing a model still require caller serialization.
 
-Lower-precision weights were not adopted: the distributed bundle is F32, and a
-new weight format needs conversion plus duration/token/motion parity evidence.
+## Experimental pose BF16 weights
+
+The converter has an opt-in `--pose-bf16` mode. It stores the pose planner's
+two-dimensional matrix weights as BF16 while retaining its embeddings,
+normalization parameters and biases as F32. Root planning, VQ decode, graph
+activations and outputs also remain F32. On the same Ryzen 9 7900, an immediate
+F32/BF16 comparison produced:
+
+| Threads | F32 plan | Pose BF16 plan | Change | F32 pose stage | BF16 pose stage |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 100.7 ms | 72.9 ms | -27.7% | 59.2 ms | 32.5 ms |
+| 2 | 60.3 ms | 45.5 ms | -24.5% | 36.0 ms | 19.6 ms |
+
+For the fixed 10-token/40-frame rolling-buffer case, BF16 reduced one-core
+latency from 90.0 to 64.1 ms (-28.7%) and two-core latency from 54.9 to
+40.4 ms (-26.4%).
+
+Vulkan does not show the same general improvement:
+
+| Device | Workload | F32 | Pose BF16 | Change |
+|---|---|---:|---:|---:|
+| RTX 5070 Ti | B=1 | 12.7 ms | 13.3 ms | +4.4% |
+| RTX 5070 Ti | Fused B=4 | 27.4 ms | 27.8 ms | +1.5% |
+| Ryzen integrated GPU | B=1 | 59.5 ms | 50.3 ms | -15.5% |
+| Ryzen integrated GPU | Fused B=4 | 141.5 ms | 152.7 ms | +7.9% |
+
+The RTX reports BF16 support, but the parity-oriented runtime disables Vulkan
+cooperative-matrix paths, so BF16 does not reach a faster matrix-core path. The
+integrated GPU reports no native BF16 support; its B=1 improvement is consistent
+with reduced UMA weight traffic, while conversion/scalar work makes the fused
+B=4 graph slower. For the four-robot case, fused F32 remains the best Vulkan
+configuration on both devices.
+
+The pose component falls from 546,369,984 to 273,601,984 bytes. Since the root
+and decoder remain F32, the complete neural bundle falls by 37.2% rather than
+50%.
+
+This mode is not the released default because it does not preserve the existing
+parity contract. Against the upstream pose fixture, maximum logit error was
+7.09 and 2 of 88 per-head argmax choices changed. A deterministic full plan
+retained 44 frames but differed from F32 by up to 0.0125 m in root translation
+and 0.0827 in a local quaternion component. It is therefore a useful
+performance/quality option to evaluate with motion-level acceptance tests, not
+a transparent replacement for the F32 bundle.
+
 Persistent graph/work-buffer caching also remains a possible follow-up, but it
 was not a leading sampled hotspot and would add substantially more lifecycle
 complexity than the retained changes.

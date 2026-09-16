@@ -107,13 +107,14 @@ bool metadata_u64(const gguf_context * context, const char * key,
 
 bool tensor_shape(const gguf_context * context, const char * name,
                   std::array<std::int64_t, 4> expected, ggml_type type,
-                  std::string & reason) {
+                  std::string & reason, ggml_type alternate = GGML_TYPE_COUNT) {
     const auto index = gguf_find_tensor(context, name);
     if (index < 0) {
         reason = std::string("missing tensor: ") + name;
         return false;
     }
-    if (gguf_get_tensor_type(context, index) != type) {
+    const auto actual_type = gguf_get_tensor_type(context, index);
+    if (actual_type != type && actual_type != alternate) {
         reason = std::string("incorrect tensor type: ") + name;
         return false;
     }
@@ -182,7 +183,8 @@ mb_status load_component(const std::filesystem::path & path, const component_spe
     if (std::string_view(spec.name) == "pose") {
         if (!tensor_shape(gguf.get(), "_pose_token_emb.weight", {32, 88, 1, 1}, GGML_TYPE_F32, reason) ||
             !tensor_shape(gguf.get(), "_position_emb.embed", {1024, 1, 16, 1}, GGML_TYPE_F32, reason) ||
-            !tensor_shape(gguf.get(), "_proj_pose_output_logit.weight", {1024, 80, 1, 1}, GGML_TYPE_F32, reason))
+            !tensor_shape(gguf.get(), "_proj_pose_output_logit.weight", {1024, 80, 1, 1},
+                          GGML_TYPE_F32, reason, GGML_TYPE_BF16))
             return MB_INCOMPATIBLE_MODEL;
     } else if (std::string_view(spec.name) == "root") {
         if (!tensor_shape(gguf.get(), "_position_emb.embed", {512, 1, 16, 1}, GGML_TYPE_F32, reason) ||

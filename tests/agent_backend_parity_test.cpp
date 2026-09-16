@@ -17,7 +17,7 @@
 namespace {
 struct snapshot { std::uint64_t frames{}; std::vector<float> roots, rotations; };
 
-bool plan(mb_device device, snapshot & output) {
+bool plan(const char * bundle, mb_device device, snapshot & output) {
     char error[1024]{};
     mb_runtime_options * options = nullptr; mb_model * model = nullptr;
     mb_style * style = nullptr; mb_agent * agent = nullptr;
@@ -28,7 +28,7 @@ bool plan(mb_device device, snapshot & output) {
     };
     bool valid = ok(mb_runtime_options_create(&options, error, sizeof error)) &&
         ok(mb_runtime_options_set_device(options, device, error, sizeof error)) &&
-        ok(mb_model_load(MOTIONBRICKS_REFERENCE_BUNDLE, options, &model, error, sizeof error)) &&
+        ok(mb_model_load(bundle, options, &model, error, sizeof error)) &&
         ok(mb_style_load(model, MOTIONBRICKS_REFERENCE_STYLES "/walk.mbstyle", &style, error, sizeof error)) &&
         ok(mb_agent_create(model, &agent, error, sizeof error)) &&
         ok(mb_agent_reset(agent, style, error, sizeof error)) &&
@@ -60,13 +60,23 @@ float maximum_error(const std::vector<float> & left, const std::vector<float> & 
 }
 }
 
-int main() {
-    snapshot cpu, vulkan;
-    if (!plan(MB_DEVICE_CPU, cpu) || !plan(MB_DEVICE_VULKAN, vulkan)) return 1;
-    const float root_error = maximum_error(cpu.roots, vulkan.roots);
-    const float rotation_error = maximum_error(cpu.rotations, vulkan.rotations);
-    std::cout << "agent backend parity frames=" << cpu.frames
+int main(int argc, char ** argv) {
+    const bool compare_bundles = argc == 3;
+    if (argc != 1 && !compare_bundles) {
+        std::cerr << "usage: motionbricks-agent-backend-parity-test [REFERENCE_BUNDLE TEST_BUNDLE]\n";
+        return 2;
+    }
+    const char * first_bundle = compare_bundles ? argv[1] : MOTIONBRICKS_REFERENCE_BUNDLE;
+    const char * second_bundle = compare_bundles ? argv[2] : MOTIONBRICKS_REFERENCE_BUNDLE;
+    const auto second_device = compare_bundles ? MB_DEVICE_CPU : MB_DEVICE_VULKAN;
+    snapshot first, second;
+    if (!plan(first_bundle, MB_DEVICE_CPU, first) ||
+        !plan(second_bundle, second_device, second)) return 1;
+    const float root_error = maximum_error(first.roots, second.roots);
+    const float rotation_error = maximum_error(first.rotations, second.rotations);
+    std::cout << "agent backend parity frames=" << first.frames
               << " root_max_abs=" << root_error
               << " rotation_max_abs=" << rotation_error << '\n';
-    return cpu.frames == vulkan.frames && root_error <= 2.0e-3F && rotation_error <= 2.0e-3F ? 0 : 1;
+    return first.frames == second.frames && root_error <= 2.0e-3F &&
+        rotation_error <= 2.0e-3F ? 0 : 1;
 }

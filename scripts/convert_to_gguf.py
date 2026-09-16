@@ -28,6 +28,9 @@ ALIGNMENT = 32
 GGML_TYPE_F32 = 0
 # ggml v0.20.2 / GGUF v3 enum value (the submodule is pinned with the bundle).
 GGML_TYPE_I32 = 26
+GGML_TYPE_BF16 = 30
+GGML_FTYPE_ALL_F32 = 0
+GGML_FTYPE_MOSTLY_BF16 = 24
 GGUF_TYPE_UINT32 = 4
 GGUF_TYPE_FLOAT32 = 6
 GGUF_TYPE_STRING = 8
@@ -125,9 +128,20 @@ class Tensor:
 
     @property
     def size(self) -> int:
-        return int(self.value.size) * 4
+        element_size = 2 if self.kind == GGML_TYPE_BF16 else 4
+        return int(self.value.size) * element_size
 
     def bytes(self) -> bytes:
+        if self.kind == GGML_TYPE_BF16:
+            # Match ggml_compute_fp32_to_bf16: round to nearest even and
+            # force NaNs to quiet NaNs.
+            floats = np.asarray(self.value, dtype="<f4", order="C")
+            bits = floats.view(np.uint32)
+            rounded = (bits + (0x7FFF + ((bits >> 16) & 1))).astype(np.uint32)
+            bf16 = (rounded >> 16).astype("<u2")
+            nan = (bits & 0x7FFFFFFF) > 0x7F800000
+            bf16[nan] = ((bits[nan] >> 16) | 64).astype("<u2")
+            return bf16.tobytes(order="C")
         dtype = "<f4" if self.kind == GGML_TYPE_F32 else "<i4"
         return np.asarray(self.value, dtype=dtype, order="C").tobytes(order="C")
 
@@ -146,8 +160,11 @@ def load_selected(path: Path, select: Callable[[str], bool], strip: str) -> list
     return output
 
 
-def tensor_kind(component: str, name: str, value: np.ndarray) -> int:
+def tensor_kind(component: str, name: str, value: np.ndarray, pose_bf16: bool = False) -> int:
     if np.issubdtype(value.dtype, np.floating):
+        if (pose_bf16 and component == "pose" and value.ndim == 2
+                and name not in {"_pose_token_emb.weight", "_proj_num_valid_positions.weight"}):
+            return GGML_TYPE_BF16
         return GGML_TYPE_F32
     if np.issubdtype(value.dtype, np.integer) or np.issubdtype(value.dtype, np.bool_):
         return GGML_TYPE_I32
@@ -156,7 +173,8 @@ def tensor_kind(component: str, name: str, value: np.ndarray) -> int:
 
 def write_component(path: Path, component: str, values: list[tuple[str, np.ndarray]],
                     source_hash: str, *, general_name: str = "NVIDIA MotionBricks G1",
-                    extra_metadata: list[bytes] | None = None) -> dict[str, object]:
+                    extra_metadata: list[bytes] | None = None,
+                    pose_bf16: bool = False) -> dict[str, object]:
     tensors: list[Tensor] = []
     names: set[str] = set()
     offset = 0
@@ -168,7 +186,7 @@ def write_component(path: Path, component: str, values: list[tuple[str, np.ndarr
         names.add(name)
         if value.ndim > 4:
             raise ValueError(f"GGML supports at most four dimensions: {name} has {value.shape}")
-        kind = tensor_kind(component, name, value)
+        kind = tensor_kind(component, name, value, pose_bf16)
         shape = tuple(int(item) for item in value.shape) or (1,)
         tensor = Tensor(name, value, kind, tuple(reversed(shape)), offset)
         tensors.append(tensor)
@@ -179,7 +197,9 @@ def write_component(path: Path, component: str, values: list[tuple[str, np.ndarr
         kv_string("general.architecture", "motionbricks"),
         kv_string("general.name", general_name),
         kv_u32("general.alignment", ALIGNMENT),
-        kv_u32("general.file_type", 0),
+        kv_u32("general.file_type",
+               GGML_FTYPE_MOSTLY_BF16 if pose_bf16 and component == "pose"
+               else GGML_FTYPE_ALL_F32),
         kv_u32("motionbricks.format_version", 1),
         kv_string("motionbricks.component", component),
         kv_string("motionbricks.skeleton", "g1skel34"),
@@ -234,6 +254,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--safe-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--pose-bf16", action="store_true",
+        help="store pose matrix weights as BF16; retain embeddings, norms, biases, and other components as F32",
+    )
     args = parser.parse_args()
 
     safe_manifest = json.loads((args.safe_directory / "manifest.json").read_text(encoding="utf-8"))
@@ -283,7 +307,8 @@ def main() -> None:
             raise ValueError(f"unexpected {component} inventory: {actual}, expected {expected[component]}")
         source = source_for[component]
         components[component] = write_component(
-            args.output / f"{component}.gguf", component, values, SAFE_HASHES[source]
+            args.output / f"{component}.gguf", component, values, SAFE_HASHES[source],
+            pose_bf16=args.pose_bf16,
         )
 
     bundle = {
