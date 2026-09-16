@@ -13,6 +13,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -482,6 +483,44 @@ mb_status mb_agent_plan(mb_agent * value, const mb_command * command, mb_motion 
         value->current_motion = std::make_unique<mb_motion>(*motion);
         value->current_frame = 0U;
         *output = motion.release();
+        return MB_OK;
+    });
+}
+
+mb_status mb_agent_plan_batch(mb_agent * const * agents,
+                              const mb_command * const * commands,
+                              uint64_t count, mb_motion ** outputs,
+                              char * error, uint64_t error_capacity) {
+    return guard(error, error_capacity, [&]() -> mb_status {
+        if (outputs == nullptr)
+            return fail(MB_INVALID_ARGUMENT, error, error_capacity, "outputs is null");
+        if (count > 64U)
+            return fail(MB_INVALID_ARGUMENT, error, error_capacity,
+                        "batch count must be in the range 1..64");
+        for (uint64_t index = 0; index < count; ++index) outputs[index] = nullptr;
+        if (agents == nullptr || commands == nullptr || count == 0U)
+            return fail(MB_INVALID_ARGUMENT, error, error_capacity,
+                        "agents, commands, or batch count is invalid");
+        std::vector<std::unique_ptr<mb_motion>> owned(count);
+        std::vector<mb_motion *> raw(count);
+        std::vector<mb_agent *> agent_values(count);
+        std::vector<const mb_command *> command_values(count);
+        for (uint64_t index = 0; index < count; ++index) {
+            owned[index] = std::make_unique<mb_motion>();
+            raw[index] = owned[index].get();
+            agent_values[index] = agents[index];
+            command_values[index] = commands[index];
+        }
+        std::string reason;
+        const auto status = motionbricks::detail::plan_agent_batch(
+            agent_values, command_values, raw, reason);
+        if (status != MB_OK) return fail(status, error, error_capacity, reason);
+        for (uint64_t index = 0; index < count; ++index) {
+            agents[index]->current_motion = std::make_unique<mb_motion>(*owned[index]);
+            agents[index]->current_frame = 0U;
+        }
+        for (uint64_t index = 0; index < count; ++index)
+            outputs[index] = owned[index].release();
         return MB_OK;
     });
 }

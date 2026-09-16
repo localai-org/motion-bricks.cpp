@@ -1,4 +1,5 @@
 #include <motionbricks/physics.h>
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -20,6 +21,8 @@ int main(int argc,char ** argv) {
     assert(mb_sonic_load(nullptr,nullptr,&model,error,sizeof(error))==MB_INVALID_ARGUMENT && !model);
     std::array<float,1762> enc{};std::array<float,994> dec{};std::array<float,64> tokens{};std::array<float,29> actions{};
     assert(mb_sonic_encode(nullptr,enc.data(),1762,tokens.data(),64,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    assert(mb_sonic_encode_batch(nullptr,enc.data(),1762,tokens.data(),64,1,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    assert(mb_sonic_decode_batch(nullptr,dec.data(),994,actions.data(),29,1,error,sizeof(error))==MB_INVALID_ARGUMENT);
     mb_physics * physics=nullptr;
     uint32_t collision_count=42;
     assert(mb_physics_collision_count(nullptr,&collision_count,error,sizeof(error))==MB_INVALID_ARGUMENT && collision_count==0);
@@ -47,6 +50,33 @@ int main(int argc,char ** argv) {
     dec[7]=-std::numeric_limits<float>::max();
     assert(mb_sonic_decode(model,dec.data(),994,actions.data(),29,error,sizeof(error))==MB_INVALID_ARGUMENT);
     dec[7]=0;assert(mb_sonic_decode(model,dec.data(),994,actions.data(),29,error,sizeof(error))==MB_OK);
+    constexpr uint32_t batch=4;
+    std::array<float,1762*batch> enc_batch{};std::array<float,64*batch> token_batch{},expected_tokens{};
+    std::array<float,994*batch> dec_batch{};std::array<float,29*batch> action_batch{},expected_actions{};
+    for(uint32_t item=0;item<batch;++item) {
+        auto * input=enc_batch.data()+item*1762;
+        for(size_t i=1;i<1762;++i) input[i]=float(int((i+item*17)%31)-15)*.0001F;
+        input[0]=0;
+        assert(mb_sonic_encode(model,input,1762,expected_tokens.data()+item*64,64,error,sizeof(error))==MB_OK);
+    }
+    assert(mb_sonic_encode_batch(model,enc_batch.data(),enc_batch.size(),token_batch.data(),token_batch.size(),0,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    assert(mb_sonic_encode_batch(model,enc_batch.data(),enc_batch.size()-1,token_batch.data(),token_batch.size(),batch,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    enc_batch[1762]=1;
+    assert(mb_sonic_encode_batch(model,enc_batch.data(),enc_batch.size(),token_batch.data(),token_batch.size(),batch,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    enc_batch[1762]=0;
+    assert(mb_sonic_encode_batch(model,enc_batch.data(),enc_batch.size(),token_batch.data(),token_batch.size(),batch,error,sizeof(error))==MB_OK);
+    assert(token_batch==expected_tokens);
+    assert(mb_sonic_layer(model,1,0,nullptr,0,&size,error,sizeof(error))==MB_OK && size==batch*2048);
+    for(uint32_t item=0;item<batch;++item) {
+        auto * input=dec_batch.data()+item*994;
+        std::copy_n(token_batch.data()+item*64,64,input);
+        for(size_t i=64;i<994;++i) input[i]=float(int((i+item*13)%37)-18)*.0001F;
+        assert(mb_sonic_decode(model,input,994,expected_actions.data()+item*29,29,error,sizeof(error))==MB_OK);
+    }
+    assert(mb_sonic_decode_batch(model,dec_batch.data(),dec_batch.size(),action_batch.data(),action_batch.size(),MB_SONIC_MAX_BATCH+1,error,sizeof(error))==MB_INVALID_ARGUMENT);
+    assert(mb_sonic_decode_batch(model,dec_batch.data(),dec_batch.size(),action_batch.data(),action_batch.size(),batch,error,sizeof(error))==MB_OK);
+    for(size_t i=0;i<action_batch.size();++i) assert(std::abs(action_batch[i]-expected_actions[i])<=2e-5F);
+    assert(mb_sonic_layer(model,0,0,nullptr,0,&size,error,sizeof(error))==MB_OK && size==batch*2048);
     if(argc>=4) {
         assert(mb_physics_create(model,argv[2],"missing-physical-config",&physics,error,sizeof(error))==MB_INVALID_FORMAT && !physics);
         assert(mb_physics_create(model,argv[2],argv[3],&physics,error,sizeof(error))==MB_OK);

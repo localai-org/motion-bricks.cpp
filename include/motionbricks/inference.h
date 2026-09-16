@@ -64,6 +64,15 @@ MB_API mb_status mb_inference_request_set_boundary_poses(mb_inference_request * 
    failure. Does not mutate the request or retain an RNG/history between calls. */
 MB_API mb_status mb_model_infer(const mb_model * model, const mb_inference_request * request,
     mb_motion ** output, char * error, uint64_t error_capacity);
+
+/* Plans count independent requests through one shared model call. Requests may
+   select different durations; native batching groups equal durations while
+   preserving input/output order. Backends may choose independent execution
+   when that is faster. `outputs` has count entries and every entry is set to
+   NULL on failure. Count must be 1..64. */
+MB_API mb_status mb_model_infer_batch(const mb_model * model,
+    const mb_inference_request * const * requests, uint64_t count,
+    mb_motion ** outputs, char * error, uint64_t error_capacity);
 #ifdef __cplusplus
 }
 #endif

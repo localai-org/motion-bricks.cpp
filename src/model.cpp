@@ -280,6 +280,12 @@ mb_status load_model_bundle(const std::filesystem::path & directory,
         options != nullptr ? options->backend_directory : std::string{},
         temporary.runtime, reason);
     if (status != MB_OK) return status;
+    if (!neural_copy_f32(*temporary.runtime, "vq-decoder", "quantizer.vq._codebook.embed",
+                         temporary.vq_codebook, reason) ||
+        temporary.vq_codebook.size() != 8U * 10U * 32U) {
+        if (reason.empty()) reason = "VQ codebook shape mismatch";
+        return MB_INCOMPATIBLE_MODEL;
+    }
     output = std::move(temporary);
     return MB_OK;
 #endif

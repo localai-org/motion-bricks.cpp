@@ -111,6 +111,13 @@ It leaves the request unchanged; no agent, command, style or physics handle
 is consulted. Both request and model may be freed once the call completes.
 The returned motion remains valid until `mb_motion_free`.
 
+`mb_model_infer_batch(model, requests, count, outputs, error, capacity)`
+submits 1--64 independent requests explicitly. Requests may choose different
+durations and results preserve request order. The function sets every output
+slot to NULL before validation and exposes no partial results on failure.
+There is no internal queue or batching delay. Backend dispatch may use
+same-duration native buckets or independent execution when that is faster.
+
 Use the existing motion getters for frame count, roots and local XYZW rotations.
 Output is 24–64 frames in multiples of four, including source/target boundary
 regions. Choose overlap removal, blending, world placement and scheduling in
@@ -118,9 +125,10 @@ your controller. Constraints condition the model; they are not guaranteed exact
 pose pins. Controller target-metadata getters return zero frames/empty buffers
 for these results; keep your own requested target poses for display.
 
-There is no hidden playback state or retained random stream. Calls sharing a
-model must still be serialized because its backend is shared. This API is
-stateless with respect to animation/control, not a promise of thread safety.
+There is no hidden playback state or retained random stream. Separate calls
+sharing a model must still be serialized because its backend is shared; use one
+batch call for work that should be submitted together. This API is stateless
+with respect to animation/control, not a promise of thread safety.
 
 ## C example
 

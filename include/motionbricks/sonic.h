@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 typedef struct mb_sonic mb_sonic;
-/* Original-release SONIC G1 mode 0, batch one, F32. Options are copied.
+#define MB_SONIC_MAX_BATCH UINT32_C(64)
+/* Original-release SONIC G1 mode 0, F32. Options are copied.
    Inference only: no physics, observation history, timing or motor control.
    encode: 1762 observation floats -> 64 FSQ token floats.
    decode: 994 observation floats (tokens first) -> 29 unscaled actions.
@@ -22,9 +23,21 @@ MB_API mb_status mb_sonic_encode(mb_sonic * model, const float * observations,
     uint64_t count, float * tokens, uint64_t token_count, char * error, uint64_t error_capacity);
 MB_API mb_status mb_sonic_decode(mb_sonic * model, const float * observations,
     uint64_t count, float * actions, uint64_t action_count, char * error, uint64_t error_capacity);
+/* Caller-controlled batching with no internal queue or waiting window. Buffers
+   contain batch_size tightly packed requests in request-major order. Counts are
+   total float counts: batch_size*1762 and *64 for encode, *994 and *29 for
+   decode. Batch sizes 1..MB_SONIC_MAX_BATCH are supported. Graph scratch is
+   cached by size; weights remain single-copy. Calls on a handle are serialized. */
+MB_API mb_status mb_sonic_encode_batch(mb_sonic * model, const float * observations,
+    uint64_t count, float * tokens, uint64_t token_count, uint32_t batch_size,
+    char * error, uint64_t error_capacity);
+MB_API mb_status mb_sonic_decode_batch(mb_sonic * model, const float * observations,
+    uint64_t count, float * actions, uint64_t action_count, uint32_t batch_size,
+    char * error, uint64_t error_capacity);
 /* Diagnostic layer: 0..4 encoder preactivations; 0..6 decoder preactivations.
-   Calling encode/decode updates these traces. Returns the exact required count;
-   NULL data / capacity 0 is a size query. No borrowed C++ layouts. */
+   Calling encode/decode updates these traces. A batch trace is request-major
+   and its count includes every request. Returns the exact required count; NULL
+   data / capacity 0 is a size query. No borrowed C++ layouts. */
 MB_API mb_status mb_sonic_layer(mb_sonic * model, uint32_t encoder, uint32_t layer,
     float * data, uint64_t capacity, uint64_t * count, char * error, uint64_t error_capacity);
 #ifdef __cplusplus

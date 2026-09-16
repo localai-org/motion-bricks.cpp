@@ -26,6 +26,7 @@ struct mb_model {
     std::vector<float> neutral_joints;
     std::vector<float> motion_mean;
     std::vector<float> motion_std;
+    std::vector<float> vq_codebook;
     std::shared_ptr<motionbricks::detail::neural_runtime> runtime;
 };
 

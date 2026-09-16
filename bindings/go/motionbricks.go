@@ -44,6 +44,7 @@ type Library struct {
 	agentReset               func(uintptr, uintptr, unsafe.Pointer, uint64) uint32
 	agentSetContext          func(uintptr, unsafe.Pointer, unsafe.Pointer, uint64, uint64, unsafe.Pointer, uint64) uint32
 	agentPlan                func(uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, uint64) uint32
+	agentPlanBatch           func(unsafe.Pointer, unsafe.Pointer, uint64, unsafe.Pointer, unsafe.Pointer, uint64) uint32
 	agentAdvance             func(uintptr, uint32, unsafe.Pointer, uint64) uint32
 	commandCreate            func(unsafe.Pointer, unsafe.Pointer, uint64) uint32
 	commandFree              func(uintptr)
@@ -91,6 +92,7 @@ func Open(path string) (*Library, error) {
 	register(&library.agentReset, "mb_agent_reset")
 	register(&library.agentSetContext, "mb_agent_set_context")
 	register(&library.agentPlan, "mb_agent_plan")
+	register(&library.agentPlanBatch, "mb_agent_plan_batch")
 	register(&library.agentAdvance, "mb_agent_advance")
 	register(&library.commandCreate, "mb_command_create")
 	register(&library.commandFree, "mb_command_free")
@@ -385,29 +387,75 @@ func (a *Agent) Plan(command *Command) (*Motion, error) {
 		return nil, err
 	}
 	defer a.model.library.motionFree(handle)
+	return a.model.library.readMotion(handle, buffer)
+}
+
+// PlanBatch plans independent robots through one native model call. Agents and
+// commands are paired by index; returned motions preserve that order.
+func (m *Model) PlanBatch(agents []*Agent, commands []*Command) ([]*Motion, error) {
+	if m == nil || m.handle == 0 || len(agents) == 0 || len(agents) > 64 || len(agents) != len(commands) {
+		return nil, errors.New("batch requires 1..64 equally sized agent and command slices")
+	}
+	agentHandles := make([]uintptr, len(agents))
+	commandHandles := make([]uintptr, len(commands))
+	for index := range agents {
+		if agents[index] == nil || agents[index].handle == 0 || agents[index].model != m ||
+			commands[index] == nil || commands[index].handle == 0 || commands[index].library != m.library {
+			return nil, errors.New("batch contains a closed, foreign, or nil agent/command")
+		}
+		agentHandles[index] = agents[index].handle
+		commandHandles[index] = commands[index].handle
+	}
+	nativeMotions := make([]uintptr, len(agents))
+	buffer := make([]byte, errorBufferSize)
+	status := m.library.agentPlanBatch(
+		unsafe.Pointer(&agentHandles[0]), unsafe.Pointer(&commandHandles[0]), uint64(len(agents)),
+		unsafe.Pointer(&nativeMotions[0]), errorPointer(buffer), uint64(len(buffer)))
+	if err := m.library.check("plan motion batch", status, buffer); err != nil {
+		return nil, err
+	}
+	defer func() {
+		for _, handle := range nativeMotions {
+			if handle != 0 {
+				m.library.motionFree(handle)
+			}
+		}
+	}()
+	result := make([]*Motion, len(nativeMotions))
+	for index, handle := range nativeMotions {
+		motion, err := m.library.readMotion(handle, buffer)
+		if err != nil {
+			return nil, fmt.Errorf("batch motion %d: %w", index, err)
+		}
+		result[index] = motion
+	}
+	return result, nil
+}
+
+func (l *Library) readMotion(handle uintptr, buffer []byte) (*Motion, error) {
 	motion := &Motion{}
 	var rootsPointer, rotationsPointer, targetRootsPointer, targetRotationsPointer uintptr
 	var rootsCount, rotationsCount, targetRootsCount, targetRotationsCount uint64
-	if err := a.model.library.check("get frame count", a.model.library.motionFrames(handle, unsafe.Pointer(&motion.Frames), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get frame count", l.motionFrames(handle, unsafe.Pointer(&motion.Frames), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
-	if err := a.model.library.check("get joint count", a.model.library.motionJoints(handle, unsafe.Pointer(&motion.Joints), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get joint count", l.motionJoints(handle, unsafe.Pointer(&motion.Joints), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
-	if err := a.model.library.check("get roots", a.model.library.motionRoots(handle, unsafe.Pointer(&rootsPointer), unsafe.Pointer(&rootsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get roots", l.motionRoots(handle, unsafe.Pointer(&rootsPointer), unsafe.Pointer(&rootsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
-	if err := a.model.library.check("get rotations", a.model.library.motionRotations(handle, unsafe.Pointer(&rotationsPointer), unsafe.Pointer(&rotationsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get rotations", l.motionRotations(handle, unsafe.Pointer(&rotationsPointer), unsafe.Pointer(&rotationsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
 	targets := &Keyframes{Joints: motion.Joints}
-	if err := a.model.library.check("get target frame count", a.model.library.motionTargetFrames(handle, unsafe.Pointer(&targets.Frames), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get target frame count", l.motionTargetFrames(handle, unsafe.Pointer(&targets.Frames), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
-	if err := a.model.library.check("get target roots", a.model.library.motionTargetRoots(handle, unsafe.Pointer(&targetRootsPointer), unsafe.Pointer(&targetRootsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get target roots", l.motionTargetRoots(handle, unsafe.Pointer(&targetRootsPointer), unsafe.Pointer(&targetRootsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
-	if err := a.model.library.check("get target rotations", a.model.library.motionTargetRotations(handle, unsafe.Pointer(&targetRotationsPointer), unsafe.Pointer(&targetRotationsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+	if err := l.check("get target rotations", l.motionTargetRotations(handle, unsafe.Pointer(&targetRotationsPointer), unsafe.Pointer(&targetRotationsCount), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
 	}
 	if rootsCount != motion.Frames*3 || rotationsCount != motion.Frames*motion.Joints*4 ||

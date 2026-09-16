@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <vector>
 
 namespace motionbricks::detail {
 namespace {
@@ -462,6 +463,85 @@ mb_status plan_agent_trace(mb_agent & agent, const mb_command & command,
                            mb_motion & output, transition_trace & trace,
                            std::string & reason) {
     return plan_agent_impl(agent, command, output, &trace, reason);
+}
+
+mb_status plan_agent_batch(std::span<mb_agent *> agents,
+                           std::span<const mb_command *> commands,
+                           std::span<mb_motion *> outputs,
+                           std::string & reason, bool force_native_batch) {
+    const auto count = agents.size();
+    if (count == 0U || count > 64U || commands.size() != count || outputs.size() != count) {
+        reason = "agent batch arrays must have the same size in the range 1..64";
+        return MB_INVALID_ARGUMENT;
+    }
+    const mb_model * model = nullptr;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (agents[index] == nullptr || commands[index] == nullptr || outputs[index] == nullptr) {
+            reason = "agent batch contains a null entry";
+            return MB_INVALID_ARGUMENT;
+        }
+        if (model == nullptr) model = agents[index]->model;
+        if (model == nullptr || agents[index]->model != model) {
+            reason = "all batched agents must use the same model";
+            return MB_INVALID_ARGUMENT;
+        }
+        if (std::find(agents.begin(), agents.begin() + static_cast<std::ptrdiff_t>(index),
+                      agents[index]) != agents.begin() + static_cast<std::ptrdiff_t>(index)) {
+            reason = "an agent may occur only once in a batch";
+            return MB_INVALID_ARGUMENT;
+        }
+    }
+    const char * debug_directory = std::getenv("MOTIONBRICKS_TRANSITION_TRACE_DIR");
+    if (debug_directory != nullptr && *debug_directory != '\0') {
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto status = plan_agent(*agents[index], *commands[index], *outputs[index], reason);
+            if (status != MB_OK) return status;
+        }
+        return MB_OK;
+    }
+
+    std::vector<mb_agent> canonical_agents(count);
+    std::vector<mb_command> canonical_commands(count);
+    std::vector<world_frame> canonical_frames(count);
+    std::vector<transition_constraints> constraints(count);
+    std::vector<std::uint64_t> seeds(count);
+    std::vector<std::uint8_t> argmax(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        auto & agent = *agents[index];
+        const auto & command = *commands[index];
+        const mb_style * style = command.style != nullptr ? command.style : agent.initial_style;
+        if (style == nullptr) {
+            reason = "agent plan requires a style";
+            return MB_INVALID_ARGUMENT;
+        }
+        if (agent.context_frames < 4U) {
+            const auto status = seed_agent_from_style(agent, *style, reason);
+            if (status != MB_OK) return status;
+        }
+        canonical_frames[index] = canonicalize(
+            agent, command, canonical_agents[index], canonical_commands[index]);
+        const auto status = build_constraints(canonical_agents[index], canonical_commands[index],
+                                              *style, constraints[index], reason);
+        if (status != MB_OK) return status;
+        seeds[index] = command.seed;
+        argmax[index] = static_cast<std::uint8_t>(command.sampling_argmax != 0U);
+    }
+    auto status = run_transition_batch(*model, constraints, outputs, seeds, argmax,
+                                       std::span<std::uint32_t>{}, reason, force_native_batch);
+    if (status != MB_OK) return status;
+    for (std::size_t index = 0; index < count; ++index) {
+        auto & output = *outputs[index];
+        output.target_frames = 4U;
+        output.target_root_translations.assign(constraints[index].target_root_translations.begin(),
+                                               constraints[index].target_root_translations.end());
+        output.target_local_rotations_xyzw.assign(
+            constraints[index].target_local_rotations_xyzw.begin(),
+            constraints[index].target_local_rotations_xyzw.end());
+        restore_world(output, canonical_frames[index]);
+        if (commands[index]->skip_context_blend == 0U)
+            apply_context_blend(*agents[index], output);
+    }
+    return MB_OK;
 }
 
 mb_status advance_agent(mb_agent & agent, std::uint32_t frames,

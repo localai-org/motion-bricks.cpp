@@ -216,6 +216,19 @@ target_link_libraries(motionbricks-parity PRIVATE motionbricks::motionbricks_sta
 set_target_properties(motionbricks-parity PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+if(MOTIONBRICKS_ENABLE_GGML)
+    add_executable(motionbricks-cpu-profile EXCLUDE_FROM_ALL reference/motionbricks_cpu_profile.cpp)
+    target_include_directories(motionbricks-cpu-profile PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-cpu-profile PRIVATE motionbricks::motionbricks_static)
+    set_target_properties(motionbricks-cpu-profile PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_executable(motionbricks-batch-profile EXCLUDE_FROM_ALL reference/motionbricks_batch_profile.cpp)
+    target_include_directories(motionbricks-batch-profile PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-batch-profile PRIVATE motionbricks::motionbricks_static)
+    set_target_properties(motionbricks-batch-profile PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
 include(CTest)
 if(TARGET ggml AND NOT GGML_BACKEND_DL AND GGML_AVX512 AND UNIX AND NOT APPLE)
     # Explicit opt-in diagnostic target; never installed or linked into runtime.

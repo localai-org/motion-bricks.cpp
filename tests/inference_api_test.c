@@ -54,6 +54,12 @@ int main(void) {
     mb_motion * output=(mb_motion *)(uintptr_t)1;
     CHECK(mb_model_infer(NULL,r,&output,e,sizeof e)==MB_INVALID_ARGUMENT&&output==NULL);
     CHECK(mb_model_infer(NULL,r,NULL,NULL,0)==MB_INVALID_ARGUMENT);
+    {
+        const mb_inference_request * requests[1]={r};
+        mb_motion * outputs[1]={(mb_motion *)(uintptr_t)1};
+        CHECK(mb_model_infer_batch(NULL,requests,1,outputs,e,sizeof e)==MB_INVALID_ARGUMENT);
+        CHECK(outputs[0]==NULL);
+    }
     char tiny[2]={'a','b'};
     CHECK(mb_inference_request_set_seed(NULL,0,tiny,1)==MB_INVALID_ARGUMENT&&tiny[0]==0&&tiny[1]=='b');
     CHECK(mb_inference_request_set_seed(r,0,e,sizeof e)==MB_OK&&e[0]==0);

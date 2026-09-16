@@ -3,6 +3,7 @@
 #include <motionbricks/motionbricks.h>
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 struct mb_agent;
@@ -23,6 +24,10 @@ mb_status plan_agent(mb_agent & agent, const mb_command & command,
 mb_status plan_agent_trace(mb_agent & agent, const mb_command & command,
                            mb_motion & output, transition_trace & trace,
                            std::string & reason);
+mb_status plan_agent_batch(std::span<mb_agent *> agents,
+                           std::span<const mb_command *> commands,
+                           std::span<mb_motion *> outputs,
+                           std::string & reason, bool force_native_batch = false);
 
 // Match full_navigation_agent.FILTER_QPOS for the public skeletal form:
 // blend root translation and the 29 physical hinge joints over the four

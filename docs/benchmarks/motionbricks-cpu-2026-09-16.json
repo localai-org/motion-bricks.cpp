@@ -1,0 +1,209 @@
+{
+  "date": "2026-09-16",
+  "source_revision": "2727a45",
+  "host": {
+    "cpu": "AMD Ryzen 9 7900 12-Core Processor",
+    "kernel": "Linux 6.18.38 x86_64",
+    "compiler": "clang 21.1.8",
+    "ggml_backend": "zen4",
+    "physical_cores": 12,
+    "threads_per_core": 2,
+    "l3": "2 x 32 MiB"
+  },
+  "fixture": {
+    "bundle": "generated/g1-f32",
+    "style": "generated/styles/walk.mbstyle",
+    "parameters": 183148382,
+    "weight_format": "F32",
+    "selected_tokens": 11,
+    "frames": 44
+  },
+  "isolated": [
+    {
+      "cpus": [0],
+      "threads": 1,
+      "requests": 1,
+      "warmup_rounds": 3,
+      "measured_rounds": 25,
+      "request_mean_ms": 113.193,
+      "request_p50_ms": 111.225,
+      "request_p95_ms": 123.308,
+      "round_mean_ms": 113.194,
+      "plans_per_second": 8.834,
+      "stage_mean_ms": {"root": 42.335, "pose": 58.174, "vq_decoder": 11.762, "representation": 0.041}
+    },
+    {
+      "cpus": [0, 1],
+      "threads": 2,
+      "requests": 1,
+      "warmup_rounds": 3,
+      "measured_rounds": 25,
+      "request_mean_ms": 70.733,
+      "request_p50_ms": 70.599,
+      "request_p95_ms": 77.132,
+      "round_mean_ms": 70.734,
+      "plans_per_second": 14.138,
+      "stage_mean_ms": {"root": 26.820, "pose": 36.628, "vq_decoder": 7.836, "representation": 0.042}
+    },
+    {
+      "cpus": [0],
+      "threads": 1,
+      "requests": 4,
+      "warmup_rounds": 2,
+      "measured_rounds": 12,
+      "request_mean_ms": 113.152,
+      "request_p50_ms": 111.447,
+      "request_p95_ms": 120.984,
+      "round_mean_ms": 452.610,
+      "plans_per_second": 8.838
+    },
+    {
+      "cpus": [0, 1],
+      "threads": 2,
+      "requests": 4,
+      "warmup_rounds": 2,
+      "measured_rounds": 12,
+      "request_mean_ms": 62.569,
+      "request_p50_ms": 59.656,
+      "request_p95_ms": 76.800,
+      "round_mean_ms": 250.277,
+      "plans_per_second": 15.982
+    }
+  ],
+  "post_optimization": {
+    "single_request": [
+      {
+        "cpus": [0],
+        "threads": 1,
+        "warmup_rounds": 3,
+        "measured_rounds": 10,
+        "request_mean_ms": 101.129,
+        "request_p50_ms": 99.180,
+        "request_p95_ms": 108.046,
+        "plans_per_second": 9.888,
+        "stage_mean_ms": {"root": 28.105, "pose": 61.230, "vq_decoder": 11.444, "representation": 0.053}
+      },
+      {
+        "cpus": [0, 1],
+        "threads": 2,
+        "warmup_rounds": 3,
+        "measured_rounds": 10,
+        "request_mean_ms": 53.932,
+        "request_p50_ms": 52.782,
+        "request_p95_ms": 60.518,
+        "plans_per_second": 18.542,
+        "stage_mean_ms": {"root": 14.794, "pose": 30.210, "vq_decoder": 6.714, "representation": 0.053}
+      }
+    ],
+    "batch_four": [
+      {
+        "cpus": [0],
+        "threads": 1,
+        "warmup_rounds": 3,
+        "measured_rounds": 8,
+        "serial_round_mean_ms": 360.776,
+        "public_batch_round_mean_ms": 360.718,
+        "public_batch_plans_per_second": 11.089,
+        "native_batch_round_mean_ms": 386.443,
+        "native_batch_speedup": 0.934
+      },
+      {
+        "cpus": [0, 1],
+        "threads": 2,
+        "warmup_rounds": 3,
+        "measured_rounds": 8,
+        "serial_round_mean_ms": 251.119,
+        "public_batch_round_mean_ms": 252.848,
+        "public_batch_plans_per_second": 15.820,
+        "native_batch_round_mean_ms": 275.962,
+        "native_batch_speedup": 0.910
+      }
+    ],
+    "native_batch_parity": {
+      "batch_size": 4,
+      "frames_match": true,
+      "same_tokens": true,
+      "max_root_abs_diff": 0.0,
+      "max_rotation_abs_diff": 0.0,
+      "root_stage_max_abs_diff": 0.0,
+      "pose_stage_max_abs_diff": 0.0,
+      "decoder_stage_max_abs_diff": 0.0
+    },
+    "vulkan": {
+      "gpu": "NVIDIA GeForce RTX 5070 Ti",
+      "driver": "595.71.05",
+      "batch_one": {
+        "warmup_rounds": 3,
+        "measured_rounds": 12,
+        "round_mean_ms": 12.531,
+        "plans_per_second": 79.803
+      },
+      "batch_four": {
+        "warmup_rounds": 5,
+        "measured_rounds": 20,
+        "serial_round_mean_ms": 49.734,
+        "batch_round_mean_ms": 27.017,
+        "speedup": 1.841,
+        "batch_plans_per_second": 148.052,
+        "max_root_abs_diff": 0.000001729,
+        "max_rotation_abs_diff": 0.000006497,
+        "root_stage_max_abs_diff": 0.000007719,
+        "pose_stage_max_abs_diff": 0.0,
+        "decoder_stage_max_abs_diff": 0.0
+      }
+    },
+    "vulkan_integrated": {
+      "gpu": "AMD Ryzen 9 7900 integrated Radeon",
+      "driver": "RADV Mesa 26.1.8",
+      "batch_one": {
+        "warmup_rounds": 3,
+        "measured_rounds": 12,
+        "round_mean_ms": 58.880,
+        "plans_per_second": 16.984
+      },
+      "batch_four": {
+        "warmup_rounds": 5,
+        "measured_rounds": 20,
+        "serial_round_mean_ms": 235.726,
+        "batch_round_mean_ms": 140.803,
+        "speedup": 1.674,
+        "batch_plans_per_second": 28.408,
+        "max_root_abs_diff": 0.000001669,
+        "max_rotation_abs_diff": 0.000007182,
+        "root_stage_max_abs_diff": 0.000005901,
+        "pose_stage_max_abs_diff": 0.0,
+        "decoder_stage_max_abs_diff": 0.0
+      }
+    }
+  },
+  "fixed_duration_one_core": [
+    {"tokens": 6, "frames": 24, "request_mean_ms": 63.083, "root_mean_ms": 17.389},
+    {"tokens": 11, "frames": 44, "request_mean_ms": 114.094, "root_mean_ms": 42.602}
+  ],
+  "four_independent_processes": {
+    "cpus": [0, 1, 6, 7],
+    "threads_per_process": 1,
+    "measured_rounds_per_process": 30,
+    "request_mean_ms": [129.122, 140.933, 118.656, 118.997],
+    "aggregate_plans_per_second": 31.673,
+    "average_request_mean_ms": 126.927,
+    "speedup_over_isolated_one_core": 3.586,
+    "note": "Indicative concurrency baseline; four separately loaded models, not batched execution."
+  },
+  "perf_one_core": {
+    "sampled_cycle_percent": {
+      "ggml_vec_dot_f32": 87.14,
+      "ggml_compute_forward_mul_mat": 5.08,
+      "memmove": 2.57,
+      "ggml_compute_forward_im2col": 1.28
+    },
+    "stat_including_load_and_warmup": {
+      "cycles": 20579997899,
+      "instructions": 28787206515,
+      "branches": 2947023911,
+      "branch_misses": 2546206,
+      "cache_references": 9999898888,
+      "cache_misses": 47388698
+    }
+  }
+}

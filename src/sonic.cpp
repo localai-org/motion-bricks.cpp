@@ -12,6 +12,7 @@
 #include <mutex>
 #include <span>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 #if defined(MOTIONBRICKS_HAVE_GGML)
 #include <ggml.h>
@@ -35,6 +36,7 @@ struct Graph {
     ggml_tensor * input = nullptr;
     ggml_tensor * output = nullptr;
     std::vector<ggml_tensor *> layers;
+    std::vector<float> input_staging,output_staging;
     bool ready = false;
 };
 constexpr std::array<int64_t,6> encoder_dims{640,2048,1024,512,512,64};
@@ -72,12 +74,12 @@ void validate(const char * file) {
         }
     }
 }
-void build(Graph & g, neural_runtime & runtime, bool encoder) {
+void build(Graph & g, neural_runtime & runtime, bool encoder, uint32_t batch=1) {
     g.context.reset(ggml_init({2U*1024U*1024U,nullptr,true}));
     if(!g.context) throw std::bad_alloc();
     auto * c=g.context.get();
     const auto dims=encoder?std::span<const int64_t>(encoder_dims):std::span<const int64_t>(decoder_dims);
-    g.input=ggml_new_tensor_1d(c,GGML_TYPE_F32,dims[0]);
+    g.input=batch==1?ggml_new_tensor_1d(c,GGML_TYPE_F32,dims[0]):ggml_new_tensor_2d(c,GGML_TYPE_F32,dims[0],batch);
     auto * x=g.input;
     for(size_t layer=0;layer+1<dims.size();++layer) {
         const auto prefix=std::string(encoder?"encoder.":"decoder.")+std::to_string(layer);
@@ -94,6 +96,10 @@ void build(Graph & g, neural_runtime & runtime, bool encoder) {
     ggml_build_forward_expand(g.graph,x);
     g.buffer.reset(ggml_backend_alloc_ctx_tensors(c,neural_backend(runtime)));
     if(!g.buffer) throw std::bad_alloc();
+    if(encoder) {
+        g.input_staging.resize(uint64_t(batch)*encoder_dims.front());
+        g.output_staging.resize(uint64_t(batch)*encoder_dims.back());
+    }
 }
 bool finite(const float * p,uint64_t n) { return std::all_of(p,p+n,[](float v){ return std::isfinite(v); }); }
 // Far beyond physical observations, but bounded before GEMM: finite FLT_MAX
@@ -123,6 +129,9 @@ struct mb_sonic {
     std::mutex mutex;
     std::shared_ptr<neural_runtime> runtime;
     Graph encoder,decoder;
+    std::unordered_map<uint32_t,std::unique_ptr<Graph>> encoder_batches,decoder_batches;
+    Graph * encoder_trace=nullptr;
+    Graph * decoder_trace=nullptr;
 };
 #else
 struct mb_sonic {};
@@ -149,42 +158,73 @@ mb_status mb_sonic_load(const char * file,const mb_runtime_options * options,mb_
     });
 }
 void mb_sonic_free(mb_sonic * model) { delete model; }
-mb_status mb_sonic_encode(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,char * error,uint64_t cap) {
+mb_status mb_sonic_encode_batch(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,uint32_t batch,char * error,uint64_t cap) {
     return guard(error,cap,[&]() -> mb_status {
-        if(!m || !obs || !out || n!=1762 || count!=64) return fail(MB_INVALID_ARGUMENT,error,cap,"encode requires 1762 input/64 output floats");
+        if(!m || !obs || !out || batch==0 || batch>MB_SONIC_MAX_BATCH || n!=uint64_t(batch)*1762 || count!=uint64_t(batch)*64)
+            return fail(MB_INVALID_ARGUMENT,error,cap,"encode batch requires 1..64 requests of 1762 input/64 output floats");
 #if defined(MOTIONBRICKS_HAVE_GGML)
-        if(!safe_input(obs,n) || obs[0]!=0) return fail(MB_INVALID_ARGUMENT,error,cap,"G1 mode-0 observations must be finite and within +/-1e6");
+        if(!safe_input(obs,n)) return fail(MB_INVALID_ARGUMENT,error,cap,"G1 mode-0 observations must be finite and within +/-1e6");
+        for(uint32_t item=0;item<batch;++item) if(obs[uint64_t(item)*1762]!=0)
+            return fail(MB_INVALID_ARGUMENT,error,cap,"G1 mode-0 observations must select mode zero");
         std::scoped_lock lock(m->mutex);
-        std::array<float,640> packed{};
-        for(size_t t=0;t<10;++t) {
-            std::copy_n(obs+4+t*58,58,packed.data()+t*64);
-            std::copy_n(obs+601+t*6,6,packed.data()+t*64+58);
+        Graph * graph=&m->encoder;
+        if(batch!=1) {
+            auto found=m->encoder_batches.find(batch);
+            if(found==m->encoder_batches.end()) {
+                auto created=std::make_unique<Graph>();build(*created,*m->runtime,true,batch);
+                found=m->encoder_batches.emplace(batch,std::move(created)).first;
+            }
+            graph=found->second.get();
         }
-        std::array<float,64> raw{};
-        execute(m->encoder,*m->runtime,packed.data(),raw.data());
-        std::transform(raw.begin(),raw.end(),out,fsq); return MB_OK;
+        for(uint32_t item=0;item<batch;++item) for(size_t t=0;t<10;++t) {
+            const auto * source=obs+uint64_t(item)*1762;
+            auto * target=graph->input_staging.data()+uint64_t(item)*640+t*64;
+            std::copy_n(source+4+t*58,58,target);
+            std::copy_n(source+601+t*6,6,target+58);
+        }
+        execute(*graph,*m->runtime,graph->input_staging.data(),graph->output_staging.data());
+        std::transform(graph->output_staging.begin(),graph->output_staging.end(),out,fsq);m->encoder_trace=graph;return MB_OK;
 #else
         return fail(MB_BACKEND_UNAVAILABLE,error,cap,"GGML unavailable");
 #endif
     });
 }
-mb_status mb_sonic_decode(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,char * error,uint64_t cap) {
+mb_status mb_sonic_decode_batch(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,uint32_t batch,char * error,uint64_t cap) {
     return guard(error,cap,[&]() -> mb_status {
-        if(!m || !obs || !out || n!=994 || count!=29) return fail(MB_INVALID_ARGUMENT,error,cap,"decode requires 994 input/29 output floats");
+        if(!m || !obs || !out || batch==0 || batch>MB_SONIC_MAX_BATCH || n!=uint64_t(batch)*994 || count!=uint64_t(batch)*29)
+            return fail(MB_INVALID_ARGUMENT,error,cap,"decode batch requires 1..64 requests of 994 input/29 output floats");
 #if defined(MOTIONBRICKS_HAVE_GGML)
         if(!safe_input(obs,n)) return fail(MB_INVALID_ARGUMENT,error,cap,"observations must be finite and within +/-1e6");
-        std::scoped_lock lock(m->mutex); execute(m->decoder,*m->runtime,obs,out); return MB_OK;
+        std::scoped_lock lock(m->mutex);
+        Graph * graph=&m->decoder;
+        if(batch!=1) {
+            auto found=m->decoder_batches.find(batch);
+            if(found==m->decoder_batches.end()) {
+                auto created=std::make_unique<Graph>();build(*created,*m->runtime,false,batch);
+                found=m->decoder_batches.emplace(batch,std::move(created)).first;
+            }
+            graph=found->second.get();
+        }
+        execute(*graph,*m->runtime,obs,out);m->decoder_trace=graph;return MB_OK;
 #else
         return fail(MB_BACKEND_UNAVAILABLE,error,cap,"GGML unavailable");
 #endif
     });
+}
+mb_status mb_sonic_encode(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,char * error,uint64_t cap) {
+    return mb_sonic_encode_batch(m,obs,n,out,count,1,error,cap);
+}
+mb_status mb_sonic_decode(mb_sonic * m,const float * obs,uint64_t n,float * out,uint64_t count,char * error,uint64_t cap) {
+    return mb_sonic_decode_batch(m,obs,n,out,count,1,error,cap);
 }
 mb_status mb_sonic_layer(mb_sonic * m,uint32_t enc,uint32_t layer,float * data,uint64_t capacity,uint64_t * count,char * error,uint64_t cap) {
     if(count) *count=0;
     return guard(error,cap,[&]() -> mb_status {
         if(!m || !count || enc>1 || (!data && capacity)) return fail(MB_INVALID_ARGUMENT,error,cap,"invalid trace request");
 #if defined(MOTIONBRICKS_HAVE_GGML)
-        std::scoped_lock lock(m->mutex); const auto & g=enc?m->encoder:m->decoder;
+        std::scoped_lock lock(m->mutex); const auto * selected=enc?m->encoder_trace:m->decoder_trace;
+        if(!selected) return fail(MB_INVALID_ARGUMENT,error,cap,"trace unavailable");
+        const auto & g=*selected;
         if(layer>=g.layers.size() || !g.ready) return fail(MB_INVALID_ARGUMENT,error,cap,"trace unavailable");
         *count=static_cast<uint64_t>(ggml_nelements(g.layers[layer]));
         if(!data && !capacity) return MB_OK;

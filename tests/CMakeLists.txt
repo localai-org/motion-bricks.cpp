@@ -14,6 +14,11 @@ if(MOTIONBRICKS_ENABLE_GGML AND EXISTS "${MOTIONBRICKS_REFERENCE_BUNDLE}/pose.gg
     target_link_libraries(motionbricks-inference-model-test PRIVATE motionbricks_static)
     add_test(NAME motionbricks-inference-model COMMAND motionbricks-inference-model-test
         "${MOTIONBRICKS_REFERENCE_BUNDLE}" "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle")
+    add_executable(motionbricks-batch-model-test batch_model_test.cpp)
+    target_include_directories(motionbricks-batch-model-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-batch-model-test PRIVATE motionbricks_static)
+    add_test(NAME motionbricks-batch-model COMMAND motionbricks-batch-model-test
+        "${MOTIONBRICKS_REFERENCE_BUNDLE}" "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle")
     if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
         add_test(NAME motionbricks-inference-model-vulkan COMMAND motionbricks-inference-model-test
             "${MOTIONBRICKS_REFERENCE_BUNDLE}" "${MOTIONBRICKS_REFERENCE_STYLES}/walk.mbstyle" vulkan)

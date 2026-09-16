@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <type_traits>
+#include <vector>
 
 struct mb_inference_request {
     motionbricks::detail::transition_constraints constraints;
@@ -76,7 +77,9 @@ mb_status mb_inference_request_set_mask(mb_inference_request * r,uint32_t f,cons
         if(!std::all_of(data,data+count,[](uint32_t v){return v<=1;}))return fail(MB_INVALID_ARGUMENT,e,n,"mask values must be 0 or 1");
         if(f==MB_INFERENCE_DURATIONS&&std::none_of(data,data+count,[](uint32_t v){return v!=0;}))return fail(MB_INVALID_ARGUMENT,e,n,"at least one duration must be enabled");
         if(f==MB_INFERENCE_GLOBAL_ROOT&&!data[0])return fail(MB_INVALID_ARGUMENT,e,n,"global root slot zero is required");
-        std::transform(data,data+count,dest.begin(),[](uint32_t v){return static_cast<uint8_t>(v);});return MB_OK;
+        for(std::size_t index=0;index<dest.size();++index)
+            dest[index]=static_cast<uint8_t>(data[index]);
+        return MB_OK;
     });
 }
 mb_status mb_inference_request_get_mask(const mb_inference_request * r,uint32_t f,uint32_t * data,uint64_t capacity,uint64_t * count,char * e,uint64_t n) {
@@ -145,6 +148,48 @@ mb_status mb_model_infer(const mb_model * model,const mb_inference_request * r,m
         const auto finite=[](float v){return std::isfinite(v);};
         if(!std::all_of(result->root_translations.begin(),result->root_translations.end(),finite)||!std::all_of(result->local_rotations_xyzw.begin(),result->local_rotations_xyzw.end(),finite))return fail(MB_COMPUTE_FAILED,e,n,"inference produced non-finite motion");
         *out=result.release();return MB_OK;
+    });
+}
+mb_status mb_model_infer_batch(const mb_model * model,
+    const mb_inference_request * const * requests,uint64_t count,
+    mb_motion ** outputs,char * e,uint64_t n) {
+    return guard(e,n,[&]() -> mb_status {
+        if(!outputs)return fail(MB_INVALID_ARGUMENT,e,n,"outputs is null");
+        if(count>64)return fail(MB_INVALID_ARGUMENT,e,n,"batch count must be in the range 1..64");
+        for(uint64_t i=0;i<count;++i)outputs[i]=nullptr;
+        if(!model||!requests||count==0)return fail(MB_INVALID_ARGUMENT,e,n,"model, requests, or batch count is invalid");
+        std::vector<motionbricks::detail::transition_constraints> constraints;
+        std::vector<uint64_t> seeds;
+        std::vector<uint8_t> argmax;
+        constraints.reserve(count);seeds.reserve(count);argmax.reserve(count);
+        for(uint64_t request_index=0;request_index<count;++request_index) {
+            const auto * r=requests[request_index];
+            if(!r)return fail(MB_INVALID_ARGUMENT,e,n,"a batch request is null");
+            for(const auto & halves:r->initialized)
+                if(!halves[0]||!halves[1])return fail(MB_INVALID_ARGUMENT,e,n,"all feature fields or both boundaries must be supplied");
+            const auto & g=r->constraints.global_root;
+            for(size_t i=0;i<8;++i)if(r->constraints.has_global_root[i]) {
+                const double norm=double(g[i*5+3])*g[i*5+3]+double(g[i*5+4])*g[i*5+4];
+                if(std::abs(norm-1)>.02)return fail(MB_INVALID_ARGUMENT,e,n,"enabled global headings require unit cosine/sine pairs");
+            }
+            constraints.push_back(r->constraints);seeds.push_back(r->seed);
+            argmax.push_back(static_cast<uint8_t>(r->argmax));
+        }
+        std::vector<std::unique_ptr<mb_motion>> owned(count);
+        std::vector<mb_motion *> raw(count);
+        for(uint64_t i=0;i<count;++i) {owned[i]=std::make_unique<mb_motion>();raw[i]=owned[i].get();}
+        std::string reason;
+        const auto status=motionbricks::detail::run_transition_batch(
+            *model,constraints,raw,seeds,argmax,std::span<uint32_t>{},reason);
+        if(status!=MB_OK)return fail(status,e,n,reason);
+        const auto finite=[](float v){return std::isfinite(v);};
+        for(uint64_t i=0;i<count;++i) {
+            if(!std::all_of(owned[i]->root_translations.begin(),owned[i]->root_translations.end(),finite)||
+               !std::all_of(owned[i]->local_rotations_xyzw.begin(),owned[i]->local_rotations_xyzw.end(),finite))
+                return fail(MB_COMPUTE_FAILED,e,n,"batched inference produced non-finite motion");
+        }
+        for(uint64_t i=0;i<count;++i)outputs[i]=owned[i].release();
+        return MB_OK;
     });
 }
 }

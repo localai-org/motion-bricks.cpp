@@ -102,9 +102,11 @@ but return `MB_BACKEND_UNAVAILABLE`. SONIC inference still works.
   `[frames,34,4]`, frame-major. Use `mb_model_get_joint_*` for names/hierarchy and
   `mb_model_get_neutral_joint_position` for rest positions. G1Skeleton34 is not
   an arbitrary humanoid, SMPL-X or SOMA skeleton.
-- Serialize operations sharing a MotionBricks model, including different
-  agents and stateless requests using that model. Serialize mutable request,
-  command, style and agent access. SONIC serializes inference internally;
+- Serialize separate operations sharing a MotionBricks model, including
+  different agents and stateless requests using that model. Use
+  `mb_agent_plan_batch` or `mb_model_infer_batch` to submit independent work
+  together. Serialize mutable request, command, style and agent access. SONIC
+  serializes inference internally;
   physics sessions require caller serialization. Use separate model handles
   for independently scheduled MotionBricks inference workers.
 
@@ -123,7 +125,9 @@ Use this when you want the supplied animation-controller behavior:
    own history with `mb_agent_set_context` (at least four frames, 34 joints).
 4. Create `mb_command`; set its style, movement/facing, target speed or world
    target, seed and optional diagnostic argmax.
-5. `mb_agent_plan` returns an owned `mb_motion`; read its borrowed buffers.
+5. `mb_agent_plan` returns one owned `mb_motion`. For several robots sharing
+   the model, `mb_agent_plan_batch` accepts parallel agent/command arrays and
+   returns motions in the same order.
 6. Call `mb_agent_advance` as your playback advances, then plan again when needed.
 
 The model must outlive its agents. A command borrows its style; keep styles
@@ -131,6 +135,12 @@ alive while referenced by commands/agents. Runtime options are copied during
 model loading and may be freed afterwards. Motions own their data independently.
 Target getters on controller-produced motions expose the four placed style
 target poses. Negative command speed selects the style's configured speed.
+
+Batch size is explicit (1--64); the library does not add a queue or waiting
+window. Every agent in a batch must be unique and belong to the same model.
+All C output slots are NULL if the call fails. Backend dispatch is allowed to
+use a fused graph or independent lanes: on the profiled CPU, independent lanes
+are faster while still sharing one loaded model.
 
 Replacing context or commands does **not** turn this into inference-only mode:
 the controller still constructs targets and applies its seam. Use `inference.h`

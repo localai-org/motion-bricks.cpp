@@ -64,6 +64,14 @@ int main(void) {
     assert(mb_model_get_parameter_count(0, &seed, error, sizeof(error)) == MB_INVALID_ARGUMENT);
     assert(mb_model_get_neutral_joint_position(0, 0, &x, &y, &z, error, sizeof(error)) == MB_INVALID_ARGUMENT);
     assert(mb_motion_get_target_frame_count(0, &seed, error, sizeof(error)) == MB_INVALID_ARGUMENT);
+    {
+        mb_agent * agents[1] = {0};
+        const mb_command * commands[1] = {command};
+        mb_motion * outputs[1] = {(mb_motion *)(uintptr_t)1};
+        assert(mb_agent_plan_batch(agents, commands, 1, outputs, error, sizeof(error)) ==
+               MB_INVALID_ARGUMENT);
+        assert(outputs[0] == 0);
+    }
 
     {
         char tiny[2] = {'x', 'x'};

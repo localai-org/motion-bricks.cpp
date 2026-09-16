@@ -155,6 +155,13 @@ MB_API mb_status mb_agent_set_context(mb_agent * value,
 MB_API mb_status mb_agent_plan(mb_agent * value, const mb_command * command,
                                mb_motion ** output,
                                char * error, uint64_t error_capacity);
+/* Plans count independent robots through one shared model call. Every
+   agent must belong to the same model and occur only once. Commands and
+   outputs are parallel arrays; outputs are all NULL on failure. Count 1..64. */
+MB_API mb_status mb_agent_plan_batch(mb_agent * const * agents,
+                                     const mb_command * const * commands,
+                                     uint64_t count, mb_motion ** outputs,
+                                     char * error, uint64_t error_capacity);
 MB_API mb_status mb_agent_advance(mb_agent * value, uint32_t frames,
                                   char * error, uint64_t error_capacity);
 

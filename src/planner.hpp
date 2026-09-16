@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -58,5 +59,14 @@ mb_status run_transition(const mb_model & model,
                          std::uint32_t * selected_tokens,
                          transition_trace * trace,
                          std::string & reason, std::uint64_t seed, bool sampling_argmax);
+
+mb_status run_transition_batch(
+    const mb_model & model,
+    std::span<const transition_constraints> constraints,
+    std::span<mb_motion *> outputs,
+    std::span<const std::uint64_t> seeds,
+    std::span<const std::uint8_t> sampling_argmax,
+    std::span<std::uint32_t> selected_tokens,
+    std::string & reason, bool force_native_batch = false);
 
 } // namespace motionbricks::detail

@@ -119,6 +119,7 @@ public:
     };
 
     backend_ptr backend;
+    mb_device device = MB_DEVICE_CPU;
     std::vector<component> components;
 };
 
@@ -222,6 +223,7 @@ static mb_status create_runtime(const std::filesystem::path & bundle,
     output.reset();
     auto runtime = std::make_shared<neural_runtime>();
     const auto selected = device == MB_DEVICE_AUTO ? MB_DEVICE_CPU : device;
+    runtime->device = selected;
     const auto initialized = initialize_backend(*runtime, selected, threads, backend_directory, reason);
     if (initialized != MB_OK) return initialized;
     if (sonic) {
@@ -258,6 +260,8 @@ ggml_backend_t neural_backend(const neural_runtime & runtime) noexcept {
     return runtime.backend.get();
 }
 
+mb_device neural_device(const neural_runtime & runtime) noexcept { return runtime.device; }
+
 ggml_tensor * neural_weight(const neural_runtime & runtime,
                             std::string_view component, std::string_view name) noexcept {
     const auto found = std::find_if(runtime.components.begin(), runtime.components.end(),
@@ -293,6 +297,8 @@ bool neural_copy_f32(const neural_runtime & runtime,
 #else
 
 class neural_runtime {};
+
+mb_device neural_device(const neural_runtime &) noexcept { return MB_DEVICE_CPU; }
 
 mb_status create_sonic_runtime(const std::filesystem::path &, mb_device, std::uint32_t,
     const std::string &, std::shared_ptr<neural_runtime> &, std::string & reason) {

@@ -16,16 +16,28 @@ Header: [`motionbricks/sonic.h`](../include/motionbricks/sonic.h).
    `mb_sonic_decode(sonic, observations, 994, actions, 29, ...)`.
 5. `mb_sonic_free` when no calls or dependent physics sessions remain.
 
+For independent requests, callers can use `mb_sonic_encode_batch` and
+`mb_sonic_decode_batch`. The caller supplies an explicit batch size from 1 to
+`MB_SONIC_MAX_BATCH` (64); there is no internal queue or batching delay. Input
+and output buffers are tightly packed in request-major order, and their counts
+are the total float counts across the batch. For example, a four-request encode
+uses 7,048 observation floats and 256 token floats. A four-request decode uses
+3,976 observation floats and 116 action floats. Graph scratch is created lazily
+and cached for each used batch size, while the model weights remain single-copy.
+Calls sharing a SONIC handle remain serialized, so submit one populated batch
+instead of four concurrent single-request calls when throughput is the goal.
+
 These are synchronous flat-F32 calls with caller-owned buffers. There is no
 simulation, control timer, motor scaling, PD controller, history update or
 MotionBricks request inside them. Decode does not implicitly reuse the last
 encoder result: **you supply the tokens in the decoder observation**. You can
 also supply compatible tokens from elsewhere and call only decode.
 
-Scope is the pinned original-release **G1 mode 0**, batch one, F32. Other encoder
-modes and incompatible model identities are rejected. Encoder observations must
-have element 0 equal to zero. All inputs, including ignored encoder elements,
-must be finite with magnitude <=1e6; invalid data is rejected, not clamped.
+Each item follows the pinned original-release **G1 mode 0**, F32 contract; the
+batch API only aggregates independent items for execution. Other encoder modes
+and incompatible model identities are rejected. Encoder observations must have
+element 0 equal to zero. All inputs, including ignored encoder elements, must be
+finite with magnitude <=1e6; invalid data is rejected, not clamped.
 
 ### Encoder observation: 1,762 floats
 
@@ -105,6 +117,7 @@ controller must implement the equivalent conversion.
 
 `mb_sonic_layer` copies cached preactivations from the last successful inference:
 encoder layers 0..4 or decoder layers 0..6. NULL/zero queries the required float
+count. Batched traces are request-major and include the batch dimension in that
 count. It is intended for parity/debugging and does not advance any controller.
 Inference calls are serialized per SONIC model, but a multi-call encode/decode/
 trace sequence is not an atomic transaction: serialize at the caller if you

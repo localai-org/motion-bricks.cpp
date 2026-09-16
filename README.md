@@ -156,6 +156,10 @@ translations `[frames,3]` and local XYZW rotations `[frames,34,4]`. Call
 `mb_agent_advance` as playback progresses so replanning uses the generated
 motion as its next context.
 
+For several robots sharing one model, `mb_agent_plan_batch` takes explicit
+parallel agent/command arrays (1--64 entries) and returns motions in input
+order. The Go binding exposes the same operation as `Model.PlanBatch`.
+
 The current implementation covers original preprocessed G1 styles. Direct
 Kimodo GLB-to-`.mbstyle` conversion remains subsequent integration work.
 

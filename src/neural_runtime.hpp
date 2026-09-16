@@ -35,6 +35,7 @@ ggml_backend_t neural_backend(const neural_runtime & runtime) noexcept;
 ggml_tensor * neural_weight(const neural_runtime & runtime,
                             std::string_view component, std::string_view name) noexcept;
 #endif
+mb_device neural_device(const neural_runtime & runtime) noexcept;
 bool neural_copy_f32(const neural_runtime & runtime,
                      std::string_view component, std::string_view name,
                      std::vector<float> & output, std::string & reason);
