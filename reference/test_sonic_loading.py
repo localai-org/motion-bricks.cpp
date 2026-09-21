@@ -40,7 +40,15 @@ class Loading(unittest.TestCase):
         self.reject(mutate)
 
     def test_architecture(self):
-        self.replace(b'g1-mode0-mlp-fsq32-v1',b'g1-mode1-mlp-fsq32-v1')
+        if b'g1-smpl-mode02-mlp-fsq32-v1' in self.original.read_bytes()[:4096]:
+            self.replace(b'g1-smpl-mode02-mlp-fsq32-v1',b'g1-smpl-mode03-mlp-fsq32-v1')
+        else:
+            self.replace(b'g1-mode0-mlp-fsq32-v1',b'g1-mode1-mlp-fsq32-v1')
+
+    def test_smpl_tensor_name(self):
+        if b'g1-smpl-mode02-mlp-fsq32-v1' not in self.original.read_bytes()[:4096]:
+            self.skipTest('combined model only')
+        self.replace(b'smpl_encoder.0.weight',b'smpl_encoder.9.weight')
 
     def test_source_identity(self):
         self.replace(b'013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3',b'0'*64)

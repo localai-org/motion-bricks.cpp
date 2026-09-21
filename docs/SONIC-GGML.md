@@ -16,11 +16,16 @@ for CPU-only F32 inference with `-O3` and profiling symbols. Local model/fixture
 assets are required for parity tests. See [backend packaging](CPU-BACKENDS.md)
 and [CPU profiling results](SONIC-CPU-PROFILE.md).
 
+The optional **SMPL mode-2 human-pose encoder** is also available in a combined
+GGUF. See [SMPL setup and parity](SONIC-SMPL.md). The existing demo/physics clip
+adapter remains G1 mode 0.
+
 ## Scope and parity
 
 The converted file contains 14,415,453 F32 parameters, approximately 58 MB.
-It contains the G1 encoder branch and decoder, **not** the other two encoder
-modes, later SONIC releases, or a text model. Unsupported modes and incompatible
+The default conversion contains the G1 encoder branch and decoder. Adding
+`--include-smpl` also includes the SMPL branch (34 tensors, about 76 MB total).
+Teleoperation mode 1, later SONIC releases and text models are not supported. Unsupported modes and incompatible
 GGUF identities are rejected. Conversion reads only hash-verified ONNX data,
 never pickle. Nothing in this implementation grants redistribution rights to
 the weights or robot assets.

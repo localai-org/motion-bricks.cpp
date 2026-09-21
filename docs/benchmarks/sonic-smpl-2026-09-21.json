@@ -1,0 +1,127 @@
+{
+  "date": "2026-09-21",
+  "scope": "Original-release G1 mode 0 plus SMPL mode 2 neural inference; no streamed-human physics adapter or camera/robot trial.",
+  "ggml_revision": "0a249dd4d2f4dfcd962123a3d881f73f93588ccf",
+  "clean_ggml_export": true,
+  "toolchain": "Stock Debian 13 container, GCC 14.2; Clang 19 sanitizers",
+  "cpu_affinity": "0-7",
+  "max_build_jobs": 8,
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "source_onnx_sha256": {
+    "encoder": "013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3",
+    "decoder": "c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed"
+  },
+  "smpl_fixture": {
+    "fixture_sha256": "85d43f7c54b9c6c0d9e07d7b6d53b0abfa612920a9af98a0d139532dc0e4bb86",
+    "capture_sha256": "1809d0e17aa2a69c86491c5ff4cfb24f4273319e686ac90414cb67d3f8d8ec0d",
+    "onnxruntime": "1.23.0",
+    "samples": 64,
+    "synthetic_samples": 64
+  },
+  "model": {
+    "file": "sonic-g1-smpl.gguf",
+    "bytes": 76227808,
+    "sha256": "ad4f587ed0df998dcc75725bf04cc6c5464906806ccc8fbf0949870a49911363",
+    "tensors": 34
+  },
+  "parity": [
+    {
+      "samples": 2205,
+      "backend": "cpu",
+      "threads": 1,
+      "max_abs": 1.23978e-05,
+      "max_relative_l2": 8.40973e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 4.0476
+    },
+    {
+      "samples": 2205,
+      "backend": "cpu",
+      "threads": 2,
+      "max_abs": 1.23978e-05,
+      "max_relative_l2": 8.40973e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 3.15928
+    },
+    {
+      "samples": 64,
+      "backend": "cpu",
+      "threads": 1,
+      "max_abs": 1.14441e-05,
+      "max_relative_l2": 8.29357e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 0.126193
+    },
+    {
+      "samples": 64,
+      "backend": "cpu",
+      "threads": 2,
+      "max_abs": 1.14441e-05,
+      "max_relative_l2": 8.29357e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 0.0920201
+    },
+    {
+      "samples": 2205,
+      "backend": "cpu",
+      "threads": 1,
+      "max_abs": 1.23978e-05,
+      "max_relative_l2": 8.40973e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 4.09345
+    },
+    {
+      "samples": 64,
+      "backend": "vulkan",
+      "threads": 4,
+      "max_abs": 1.14441e-05,
+      "max_relative_l2": 8.01558e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 0.352708
+    },
+    {
+      "samples": 2205,
+      "backend": "vulkan",
+      "threads": 4,
+      "max_abs": 1.33514e-05,
+      "max_relative_l2": 6.93207e-07,
+      "token_mismatches": 0,
+      "elapsed_seconds": 1.74132
+    }
+  ],
+  "acceptance": {
+    "max_abs": 0.0005,
+    "max_relative_l2": 1e-05,
+    "token_mismatches": 0
+  },
+  "api_checks": {
+    "cpu": true,
+    "vulkan": true,
+    "asan_ubsan": true,
+    "batch_sizes": [
+      1,
+      4,
+      64
+    ],
+    "mixed_mode_batches_rejected": true,
+    "legacy_mode2_rejected": true,
+    "ignored_fields_tested": true,
+    "loading_rejections_passed": 5
+  },
+  "legacy_conversion_byte_identical": true,
+  "fuzz": {
+    "engine": "Clang libFuzzer + ASan/UBSan",
+    "budget_seconds": 60,
+    "elapsed_seconds": 61,
+    "executions": 500043,
+    "findings": 0,
+    "scope": "Production ABI/inference inputs on combined GGUF. Project instrumented; GGML/driver binaries not instrumented. GGUF parser outside campaign."
+  },
+  "raw_logs": [
+    "/tmp/mb-sonic-smpl-tests.log",
+    "/tmp/mb-sonic-smpl-vulkan.log",
+    "/tmp/mb-sonic-smpl-boundaries.log",
+    "/tmp/mb-sonic-smpl-asan.log",
+    "/tmp/mb-sonic-smpl-asan-final.log"
+  ]
+}

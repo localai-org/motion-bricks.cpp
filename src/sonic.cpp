@@ -1,4 +1,4 @@
-// G1 MLP/FSQ graph structure follows the pinned official NVIDIA SONIC ONNX
+// G1 and SMPL MLP/FSQ graph structure follows the pinned official NVIDIA SONIC ONNX
 // export. No upstream inference code is copied; inference uses GGML only.
 #include <motionbricks/sonic.h>
 #include "error.hpp"
@@ -40,13 +40,14 @@ struct Graph {
     bool ready = false;
 };
 constexpr std::array<int64_t,6> encoder_dims{640,2048,1024,512,512,64};
+constexpr std::array<int64_t,6> smpl_dims{840,2048,1024,512,512,64};
 constexpr std::array<int64_t,8> decoder_dims{994,2048,2048,1024,1024,512,512,29};
 void identity(gguf_context * c, const char * key, const char * expected) {
     auto i=gguf_find_key(c,key);
     if(i<0 || gguf_get_kv_type(c,i)!=GGUF_TYPE_STRING || std::string(gguf_get_val_str(c,i))!=expected)
         throw std::invalid_argument(std::string("incompatible SONIC metadata: ")+key);
 }
-void validate(const char * file) {
+bool validate(const char * file) {
     const auto bytes=std::filesystem::file_size(file);
     if(bytes<1024 || bytes>100U*1024U*1024U) throw std::invalid_argument("invalid SONIC GGUF size");
     std::unique_ptr<gguf_context,GgufDelete> c(gguf_init_from_file(file,{true,nullptr}));
@@ -55,14 +56,20 @@ void validate(const char * file) {
     identity(c.get(),"motionbricks.component","sonic");
     identity(c.get(),"motionbricks.skeleton","g1skel34");
     identity(c.get(),"motionbricks.source_sha256","013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3");
-    identity(c.get(),"sonic.architecture","g1-mode0-mlp-fsq32-v1");
+    const auto architecture=gguf_find_key(c.get(),"sonic.architecture");
+    if(architecture<0 || gguf_get_kv_type(c.get(),architecture)!=GGUF_TYPE_STRING)
+        throw std::invalid_argument("missing SONIC architecture");
+    const std::string kind=gguf_get_val_str(c.get(),architecture);
+    const bool smpl=kind=="g1-smpl-mode02-mlp-fsq32-v1";
+    if(!smpl && kind!="g1-mode0-mlp-fsq32-v1")
+        throw std::invalid_argument("unsupported SONIC architecture");
     identity(c.get(),"sonic.encoder_sha256","013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3");
     identity(c.get(),"sonic.decoder_sha256","c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed");
-    if(gguf_get_n_tensors(c.get())!=24) throw std::invalid_argument("unexpected SONIC tensor count");
-    for(int component=0;component<2;++component) {
-        const auto dims = component==0 ? std::span<const int64_t>(encoder_dims) : std::span<const int64_t>(decoder_dims);
+    if(gguf_get_n_tensors(c.get())!=(smpl?34:24)) throw std::invalid_argument("unexpected SONIC tensor count");
+    for(int component=0;component<(smpl?3:2);++component) {
+        const auto dims = component==0 ? std::span<const int64_t>(encoder_dims) : component==1 ? std::span<const int64_t>(decoder_dims) : std::span<const int64_t>(smpl_dims);
         for(size_t layer=0;layer+1<dims.size();++layer) for(bool bias:{false,true}) {
-            const std::string name=std::string(component==0?"encoder.":"decoder.")+std::to_string(layer)+(bias?".bias":".weight");
+            const std::string name=std::string(component==0?"encoder.":component==1?"decoder.":"smpl_encoder.")+std::to_string(layer)+(bias?".bias":".weight");
             const auto index=gguf_find_tensor(c.get(),name.c_str());
             if(index<0 || gguf_get_tensor_type(c.get(),index)!=GGML_TYPE_F32) throw std::invalid_argument("missing/non-F32 SONIC tensor: "+name);
             const auto * ne=gguf_get_tensor_ne(c.get(),index);
@@ -73,16 +80,17 @@ void validate(const char * file) {
             if(offset>bytes || amount>bytes-offset) throw std::invalid_argument("truncated SONIC tensor: "+name);
         }
     }
+    return smpl;
 }
-void build(Graph & g, neural_runtime & runtime, bool encoder, uint32_t batch=1) {
+void build(Graph & g, neural_runtime & runtime, bool encoder, uint32_t batch=1, bool smpl=false) {
     g.context.reset(ggml_init({2U*1024U*1024U,nullptr,true}));
     if(!g.context) throw std::bad_alloc();
     auto * c=g.context.get();
-    const auto dims=encoder?std::span<const int64_t>(encoder_dims):std::span<const int64_t>(decoder_dims);
+    const auto dims=encoder?std::span<const int64_t>(smpl?smpl_dims:encoder_dims):std::span<const int64_t>(decoder_dims);
     g.input=batch==1?ggml_new_tensor_1d(c,GGML_TYPE_F32,dims[0]):ggml_new_tensor_2d(c,GGML_TYPE_F32,dims[0],batch);
     auto * x=g.input;
     for(size_t layer=0;layer+1<dims.size();++layer) {
-        const auto prefix=std::string(encoder?"encoder.":"decoder.")+std::to_string(layer);
+        const auto prefix=std::string(encoder?(smpl?"smpl_encoder.":"encoder."):"decoder.")+std::to_string(layer);
         auto * w=neural_weight(runtime,"sonic",prefix+".weight");
         auto * b=neural_weight(runtime,"sonic",prefix+".bias");
         auto * product=ggml_mul_mat(c,w,x);
@@ -97,8 +105,8 @@ void build(Graph & g, neural_runtime & runtime, bool encoder, uint32_t batch=1) 
     g.buffer.reset(ggml_backend_alloc_ctx_tensors(c,neural_backend(runtime)));
     if(!g.buffer) throw std::bad_alloc();
     if(encoder) {
-        g.input_staging.resize(uint64_t(batch)*encoder_dims.front());
-        g.output_staging.resize(uint64_t(batch)*encoder_dims.back());
+        g.input_staging.resize(uint64_t(batch)*dims.front());
+        g.output_staging.resize(uint64_t(batch)*dims.back());
     }
 }
 bool finite(const float * p,uint64_t n) { return std::all_of(p,p+n,[](float v){ return std::isfinite(v); }); }
@@ -128,8 +136,9 @@ float fsq(float x) {
 struct mb_sonic {
     std::mutex mutex;
     std::shared_ptr<neural_runtime> runtime;
-    Graph encoder,decoder;
-    std::unordered_map<uint32_t,std::unique_ptr<Graph>> encoder_batches,decoder_batches;
+    Graph encoder,decoder,smpl_encoder;
+    bool has_smpl=false;
+    std::unordered_map<uint32_t,std::unique_ptr<Graph>> encoder_batches,decoder_batches,smpl_batches;
     Graph * encoder_trace=nullptr;
     Graph * decoder_trace=nullptr;
 };
@@ -144,13 +153,16 @@ mb_status mb_sonic_load(const char * file,const mb_runtime_options * options,mb_
         if(!output || !file || !*file) return fail(MB_INVALID_ARGUMENT,error,cap,"SONIC file/output required");
 #if defined(MOTIONBRICKS_HAVE_GGML)
         if(options && options->device>MB_DEVICE_VULKAN) return fail(MB_INVALID_ARGUMENT,error,cap,"invalid device");
-        try { validate(file); } catch(const std::exception & e) { return fail(MB_INVALID_FORMAT,error,cap,e.what()); }
+        bool has_smpl=false;
+        try { has_smpl=validate(file); } catch(const std::exception & e) { return fail(MB_INVALID_FORMAT,error,cap,e.what()); }
         auto model=std::make_unique<mb_sonic>();
+        model->has_smpl=has_smpl;
         std::string reason;
         auto status=create_sonic_runtime(file,options?options->device:MB_DEVICE_CPU,options?options->threads:4,
             options?options->backend_directory:"",model->runtime,reason);
         if(status!=MB_OK) return fail(status,error,cap,reason);
         build(model->encoder,*model->runtime,true); build(model->decoder,*model->runtime,false);
+        if(has_smpl) build(model->smpl_encoder,*model->runtime,true,1,true);
         *output=model.release(); return MB_OK;
 #else
         (void)options; return fail(MB_BACKEND_UNAVAILABLE,error,cap,"GGML unavailable");
@@ -163,24 +175,35 @@ mb_status mb_sonic_encode_batch(mb_sonic * m,const float * obs,uint64_t n,float 
         if(!m || !obs || !out || batch==0 || batch>MB_SONIC_MAX_BATCH || n!=uint64_t(batch)*1762 || count!=uint64_t(batch)*64)
             return fail(MB_INVALID_ARGUMENT,error,cap,"encode batch requires 1..64 requests of 1762 input/64 output floats");
 #if defined(MOTIONBRICKS_HAVE_GGML)
-        if(!safe_input(obs,n)) return fail(MB_INVALID_ARGUMENT,error,cap,"G1 mode-0 observations must be finite and within +/-1e6");
-        for(uint32_t item=0;item<batch;++item) if(obs[uint64_t(item)*1762]!=0)
-            return fail(MB_INVALID_ARGUMENT,error,cap,"G1 mode-0 observations must select mode zero");
+        if(!safe_input(obs,n)) return fail(MB_INVALID_ARGUMENT,error,cap,"observations must be finite and within +/-1e6");
+        const bool smpl=obs[0]==2;
+        if(obs[0]!=0 && !smpl) return fail(MB_INVALID_ARGUMENT,error,cap,"SONIC supports encoder modes 0 and 2 only");
+        if(smpl && !m->has_smpl) return fail(MB_INVALID_ARGUMENT,error,cap,"SMPL encoder absent; convert with --include-smpl");
+        for(uint32_t item=1;item<batch;++item) if(obs[uint64_t(item)*1762]!=obs[0])
+            return fail(MB_INVALID_ARGUMENT,error,cap,"all batch requests must select the same encoder mode");
         std::scoped_lock lock(m->mutex);
-        Graph * graph=&m->encoder;
+        Graph * graph=smpl?&m->smpl_encoder:&m->encoder;
+        auto & batches=smpl?m->smpl_batches:m->encoder_batches;
         if(batch!=1) {
-            auto found=m->encoder_batches.find(batch);
-            if(found==m->encoder_batches.end()) {
-                auto created=std::make_unique<Graph>();build(*created,*m->runtime,true,batch);
-                found=m->encoder_batches.emplace(batch,std::move(created)).first;
+            auto found=batches.find(batch);
+            if(found==batches.end()) {
+                auto created=std::make_unique<Graph>();build(*created,*m->runtime,true,batch,smpl);
+                found=batches.emplace(batch,std::move(created)).first;
             }
             graph=found->second.get();
         }
         for(uint32_t item=0;item<batch;++item) for(size_t t=0;t<10;++t) {
             const auto * source=obs+uint64_t(item)*1762;
-            auto * target=graph->input_staging.data()+uint64_t(item)*640+t*64;
-            std::copy_n(source+4+t*58,58,target);
-            std::copy_n(source+601+t*6,6,target+58);
+            if(smpl) {
+                auto * target=graph->input_staging.data()+uint64_t(item)*840+t*84;
+                std::copy_n(source+922+t*72,72,target);
+                std::copy_n(source+1642+t*6,6,target+72);
+                std::copy_n(source+1702+t*6,6,target+78);
+            } else {
+                auto * target=graph->input_staging.data()+uint64_t(item)*640+t*64;
+                std::copy_n(source+4+t*58,58,target);
+                std::copy_n(source+601+t*6,6,target+58);
+            }
         }
         execute(*graph,*m->runtime,graph->input_staging.data(),graph->output_staging.data());
         std::transform(graph->output_staging.begin(),graph->output_staging.end(),out,fsq);m->encoder_trace=graph;return MB_OK;

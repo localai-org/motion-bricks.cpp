@@ -293,6 +293,36 @@ if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND EXISTS "${MOTIONBRICKS_SONIC_GGU
     endif()
 endif()
 
+set(MOTIONBRICKS_SONIC_SMPL_GGUF "${PROJECT_SOURCE_DIR}/generated/sonic/ggml/sonic-g1-smpl.gguf" CACHE FILEPATH "Optional combined G1/SMPL SONIC GGUF")
+set(MOTIONBRICKS_SONIC_SMPL_FIXTURE "${PROJECT_SOURCE_DIR}/generated/sonic/ggml/smpl-layers.mbsonic" CACHE FILEPATH "Independent SMPL ONNX layer fixture")
+add_executable(motionbricks-sonic-smpl-test sonic_smpl_test.cpp)
+target_link_libraries(motionbricks-sonic-smpl-test PRIVATE motionbricks_shared)
+if(MSVC)
+    target_compile_options(motionbricks-sonic-smpl-test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(motionbricks-sonic-smpl-test PRIVATE -UNDEBUG)
+endif()
+if(MOTIONBRICKS_ENABLE_GGML AND TARGET ggml AND EXISTS "${MOTIONBRICKS_SONIC_SMPL_GGUF}")
+    if(EXISTS "${MOTIONBRICKS_SONIC_GGUF}")
+        add_test(NAME motionbricks-sonic-smpl-api COMMAND motionbricks-sonic-smpl-test "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_GGUF}")
+        if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+            add_test(NAME motionbricks-sonic-smpl-api-vulkan COMMAND motionbricks-sonic-smpl-test "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_GGUF}" vulkan)
+            set_tests_properties(motionbricks-sonic-smpl-api-vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+        endif()
+    endif()
+    if(EXISTS "${MOTIONBRICKS_SONIC_SMPL_FIXTURE}")
+        add_test(NAME motionbricks-sonic-smpl-parity-cpu COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_SMPL_FIXTURE}" cpu 1)
+        add_test(NAME motionbricks-sonic-smpl-parity-cpu-2 COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_SMPL_FIXTURE}" cpu 2)
+        if(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+            add_test(NAME motionbricks-sonic-smpl-parity-vulkan COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_SMPL_FIXTURE}" vulkan)
+            set_tests_properties(motionbricks-sonic-smpl-parity-vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+        endif()
+    endif()
+    if(EXISTS "${MOTIONBRICKS_SONIC_FIXTURE}")
+        add_test(NAME motionbricks-sonic-combined-g1-parity COMMAND motionbricks-sonic-parity "${MOTIONBRICKS_SONIC_SMPL_GGUF}" "${MOTIONBRICKS_SONIC_FIXTURE}" cpu 1)
+    endif()
+endif()
+
 if(MOTIONBRICKS_CPU_ALL_VARIANTS AND TARGET ggml AND NOT MOTIONBRICKS_SANITIZE AND
    CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND AND
    EXISTS "${MOTIONBRICKS_SONIC_GGUF}")
@@ -309,6 +339,7 @@ if(MOTIONBRICKS_SANITIZE)
             motionbricks-inference-api-test
             motionbricks-inference-model-test
             motionbricks-sonic-api-test
+            motionbricks-sonic-smpl-test
             motionbricks-c-api-test
             motionbricks-cpp-wrapper-test
             motionbricks-session-replay-test

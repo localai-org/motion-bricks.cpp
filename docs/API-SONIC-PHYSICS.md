@@ -33,13 +33,14 @@ MotionBricks request inside them. Decode does not implicitly reuse the last
 encoder result: **you supply the tokens in the decoder observation**. You can
 also supply compatible tokens from elsewhere and call only decode.
 
-Each item follows the pinned original-release **G1 mode 0**, F32 contract; the
-batch API only aggregates independent items for execution. Other encoder modes
-and incompatible model identities are rejected. Encoder observations must have
-element 0 equal to zero. All inputs, including ignored encoder elements, must be
+Each item follows the pinned original-release F32 contract. Legacy GGUFs support
+**G1 mode 0**; a combined GGUF converted with `--include-smpl` also supports
+**human-pose SMPL mode 2**. Element 0 selects the mode. Every request in an
+encoder batch must select the same mode; different calls may switch modes.
+Modes 1/3, mode 2 on a legacy file, and incompatible model identities are rejected. All inputs, including ignored encoder elements, must be
 finite with magnitude <=1e6; invalid data is rejected, not clamped.
 
-### Encoder observation: 1,762 floats
+### G1 encoder observation (mode 0): 1,762 floats
 
 Offsets below are zero-based, half-open. Initialize unused fields to zero.
 
@@ -67,6 +68,57 @@ Our physical adapter samples ten reference poses at current reference time plus
 `0,.1,...,.9` seconds and computes velocities using a .02-second forward step.
 Past the reference end it holds the final pose and supplies zero velocities.
 The encoder itself neither samples motion nor computes these observations.
+
+### Human-pose encoder observation (mode 2): 1,762 floats
+
+Use the same `mb_sonic_encode` / `mb_sonic_encode_batch` functions and the same
+64-float token output. Load the combined GGUF described in
+[SMPL conversion and validation](SONIC-SMPL.md). Existing G1 files remain usable
+for mode 0; they do not contain human-encoder weights.
+
+| Offsets | Shape | Mode-2 meaning |
+|---|---|---|
+| `[0,1)` | 1 | Mode selector, exactly 2 |
+| `[922,1642)` | `[10,24,3]` | Root-local SMPL joint positions, metres, canonical SMPL order |
+| `[1642,1702)` | `[10,6]` | Reference anchor orientations relative to the physical base |
+| `[1702,1762)` | `[10,6]` | G1 wrist angles, radians |
+| All other offsets | — | Unused; initialize to zero |
+
+These are three separate frame-major blocks. Native packing interleaves each
+frame's 72 joint coordinates, six orientation values and six wrist values into
+the 840-element MLP input, matching the pinned ONNX graph exactly. It then
+applies the same FSQ32 operation as mode 0. Encoder layer traces report whichever
+mode last completed successfully; the decoder and its observation layout are
+shared between modes.
+
+For the original release, the ten reference samples are at current reference
+time plus `0,.02,...,.18` seconds. They are not the decoder's past-state history.
+Sampling, live buffering/holding and interpolation remain the caller's job.
+Wrist order is Isaac indices 23–28: left roll, right roll, left pitch, right
+pitch, left yaw, right yaw. Zeros reproduce the upstream webcam bridge's wrist
+references.
+
+The orientation input is **not a raw quaternion**. For each reference sample,
+apply upstream's initial heading alignment, express the reference orientation
+relative to the current physical base, and provide the rotation matrix's first
+two columns as `[R00,R01,R10,R11,R20,R21]`. The root-local SMPL joint coordinates
+must already follow SONIC's SMPL convention. This API does not perform SOMA
+mapping, axis conversion, root removal or heading calibration.
+
+```c
+float observations[1762] = {0};
+float tokens[64];
+observations[0] = 2;
+/* Fill observations[922:1642], [1642:1702], [1702:1762] as above. */
+mb_status status = mb_sonic_encode(sonic, observations, 1762,
+                                  tokens, 64, error, error_capacity);
+/* On MB_OK, place tokens at the start of a 994-float decoder observation. */
+```
+
+No network protocol is involved. This inference interface can be called from a
+LocalAI backend regardless of whether its client uses HTTP or WebSocket.
+The existing `mb_physics_step` still constructs **G1 mode-0** references from
+robot clips; it has not gained a streamed-human-reference input in this change.
 
 ### Decoder observation: 994 floats
 

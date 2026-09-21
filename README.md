@@ -12,6 +12,8 @@ and pose-token decisions in the reference suite.
 The demo also offers optional native MuJoCo physics driven by **GGML SONIC**,
 including Kimodo animation playback, with target/reference/physical skeletons.
 The original G1 mode-0 policy passes independent CPU/Vulkan layer parity.
+The optional [human-pose SMPL encoder](docs/SONIC-SMPL.md) also runs natively;
+connecting it to streamed poses and the simulation is a separate integration step.
 See [SONIC setup, results and limitations](docs/SONIC-GGML.md) and the
 [MuJoCo 3.12 upgrade notes](docs/MUJOCO-UPGRADE.md).
 The browser sends WebSocket commands and renders buffered server-owned motion;
