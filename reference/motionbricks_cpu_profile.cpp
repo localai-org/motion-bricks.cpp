@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -154,6 +155,12 @@ int main(int argc, char ** argv) try {
     std::vector<double> round_ms;
     request_ms.reserve(static_cast<std::size_t>(rounds) * requests);
     round_ms.reserve(rounds);
+    std::fstream perf_control;
+    if (const char * path = std::getenv("MOTIONBRICKS_PROFILE_PERF_CONTROL")) {
+        perf_control.open(path, std::ios::in | std::ios::out);
+        if (!perf_control) throw std::runtime_error("cannot open perf control FIFO");
+        perf_control << "enable\n" << std::flush;
+    }
     for (std::uint32_t round = 0; round < rounds; ++round) {
         const auto begin = clock_type::now();
         for (std::uint32_t request = 0; request < requests; ++request)
@@ -161,6 +168,7 @@ int main(int argc, char ** argv) try {
         const auto end = clock_type::now();
         round_ms.push_back(std::chrono::duration<double, std::milli>(end - begin).count());
     }
+    if (perf_control) perf_control << "disable\n" << std::flush;
 
     constexpr std::uint32_t trace_rounds = 3U;
     std::array<std::vector<double>, 4> stage_samples;
