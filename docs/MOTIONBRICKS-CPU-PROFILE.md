@@ -207,3 +207,9 @@ experimental weight format parity-preserving.
 
 The detailed measurements, including the SONIC batch comparison, are stored in
 `docs/benchmarks/llamafile-cpu-2026-09-16.json`.
+
+A follow-up tested four tinyBLAS data-movement changes: a 2-by-N tile, explicit
+software prefetch, persistent interleaved weight packing, and K-blocked partial
+accumulators. All four were slower than upstream. Latency and measured-region
+Zen counter breakdowns are recorded in
+`docs/benchmarks/TINYBLAS-CACHE-EXPERIMENTS-2026-09-16.md`.
