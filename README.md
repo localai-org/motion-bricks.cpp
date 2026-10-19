@@ -1,5 +1,9 @@
 # motion-bricks.cpp
 
+**Brought to you by the [LocalAI](https://github.com/mudler/LocalAI) team**, the folks behind LocalAI, the open-source AI engine that runs any model (LLMs, vision, voice, image, video) on any hardware, no GPU required.
+
+[![LocalAI](https://img.shields.io/badge/LocalAI-Run_Locally-orange)](https://github.com/mudler/LocalAI)
+
 A C++23/GGML port of NVIDIA MotionBricks for CPU and Vulkan inference, with a
 stable C ABI suitable for PureGo.
 
