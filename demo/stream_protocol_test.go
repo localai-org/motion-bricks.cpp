@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -90,7 +91,7 @@ func TestStreamSocketProtocol(t *testing.T) {
 
 func TestStreamOwnershipAndDeduplication(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &streamHub{s: &demoServer{styles: map[string]*mb.Style{"walk": {Name: "walk"}}}, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 8), input: make(chan streamInput, 8), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
+	h := &streamHub{backend: g1StreamPlanner{&demoServer{styles: map[string]*mb.Style{"walk": {Name: "walk"}}, ordered: []styleInfo{{Name: "walk"}}}}, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 8), input: make(chan streamInput, 8), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
 	go h.run()
 	defer h.Close()
 	peer := func() *streamPeer {
@@ -151,69 +152,158 @@ func TestStreamOwnershipAndDeduplication(t *testing.T) {
 }
 
 func TestStreamIdleScheduling(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	h := &streamHub{s: &demoServer{styles: map[string]*mb.Style{"walk": {Name: "walk"}, "idle": {Name: "idle"}}}, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 8), input: make(chan streamInput, 8), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
-	go h.run()
-	defer h.Close()
-	a, b := net.Pipe()
-	defer b.Close()
-	p := &streamPeer{conn: a, events: make(chan streamWire, 32), poses: make(chan []byte, 1), done: make(chan struct{})}
-	h.join <- streamJoin{peer: p}
-	var job streamPlan
-	select {
-	case job = <-h.jobs:
-	case <-time.After(time.Second):
-		t.Fatal("no initial plan")
+	for _, joints := range []int{34, 77} {
+		t.Run(fmt.Sprint(joints), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			h := &streamHub{backend: fixtureStreamPlanner{joints}, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 8), input: make(chan streamInput, 8), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
+			go h.run()
+			defer h.Close()
+			a, b := net.Pipe()
+			defer b.Close()
+			p := &streamPeer{conn: a, events: make(chan streamWire, 32), poses: make(chan []byte, 1), done: make(chan struct{})}
+			h.join <- streamJoin{peer: p}
+			var job streamPlan
+			select {
+			case job = <-h.jobs:
+			case <-time.After(time.Second):
+				t.Fatal("no initial plan")
+			}
+			if job.command.Style != "idle" || job.command.Speed == nil || *job.command.Speed != 0 {
+				t.Fatal("zero direction did not request a stop", job.command)
+			}
+			h.results <- streamResult{job: job, motion: testJointMotion(8, joints, joints == 77)}
+			time.Sleep(400 * time.Millisecond)
+			select {
+			case <-h.jobs:
+				t.Fatal("settled idle replanned without input")
+			default:
+			}
+			var frame streamFrame
+			select {
+			case data := <-p.poses:
+				if err := json.Unmarshal(data, &frame); err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no held frame")
+			}
+			if !frame.Holding || frame.Paused || frame.Error != "" || frame.Time < .3 {
+				t.Fatal("idle failed to hold with clock running", frame)
+			}
+			h.input <- streamInput{p, streamCommand{Type: "control", Seq: 1, Style: "walk", Move: [2]float32{0, 1}, Facing: [2]float32{0, 1}}}
+			select {
+			case job = <-h.jobs:
+			case <-time.After(time.Second):
+				t.Fatal("held idle cannot resume")
+			}
+			if job.command.Style != "walk" || job.command.Speed != nil {
+				t.Fatal("idle speed leaked into walking", job.command)
+			}
+			// Deliberately exceed the lookahead. The simulation must wait before the
+			// reserved seam, then accept the same plan instead of exhausting/retrying.
+			time.Sleep(600 * time.Millisecond)
+			select {
+			case data := <-p.poses:
+				if err := json.Unmarshal(data, &frame); err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no planning snapshot")
+			}
+			if !frame.Planning || frame.Paused || frame.Error != "" || frame.Time*30 > float64(job.at-1) {
+				t.Fatal("late planner crossed its reserved seam", frame)
+			}
+			h.results <- streamResult{job: job, motion: testJointMotion(24, joints, joints == 77)}
+			select {
+			case <-h.jobs:
+			case <-time.After(time.Second):
+				t.Fatal("late planner did not recover to ordinary walking")
+			}
+		})
 	}
-	if job.command.Style != "idle" || job.command.Speed == nil || *job.command.Speed != 0 {
-		t.Fatal("zero direction did not request a stop", job.command)
+}
+
+// Planner jobs are completed explicitly by scheduler tests to control latency.
+type fixtureStreamPlanner struct{ joints int }
+
+func (p fixtureStreamPlanner) styles() []styleInfo {
+	return []styleInfo{{Name: "walk"}, {Name: "idle"}}
+}
+func (p fixtureStreamPlanner) contextOffset() int {
+	if p.joints == 77 {
+		return -3
 	}
-	h.results <- streamResult{job: job, motion: testMotion(8)}
-	time.Sleep(400 * time.Millisecond)
-	select {
-	case <-h.jobs:
-		t.Fatal("settled idle replanned without input")
-	default:
-	}
-	var frame streamFrame
-	select {
-	case data := <-p.poses:
-		if err := json.Unmarshal(data, &frame); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no held frame")
-	}
-	if !frame.Holding || frame.Paused || frame.Error != "" || frame.Time < .3 {
-		t.Fatal("idle failed to hold with clock running", frame)
-	}
-	h.input <- streamInput{p, streamCommand{Type: "control", Seq: 1, Style: "walk", Move: [2]float32{0, 1}, Facing: [2]float32{0, 1}}}
-	select {
-	case job = <-h.jobs:
-	case <-time.After(time.Second):
-		t.Fatal("held idle cannot resume")
-	}
-	if job.command.Style != "walk" || job.command.Speed != nil {
-		t.Fatal("idle speed leaked into walking", job.command)
-	}
-	// Deliberately exceed the lookahead. The simulation must wait before the
-	// reserved seam, then accept the same plan instead of exhausting/retrying.
-	time.Sleep(600 * time.Millisecond)
-	select {
-	case data := <-p.poses:
-		if err := json.Unmarshal(data, &frame); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no planning snapshot")
-	}
-	if !frame.Planning || frame.Paused || frame.Error != "" || frame.Time*30 > float64(job.at-1) {
-		t.Fatal("late planner crossed its reserved seam", frame)
-	}
-	h.results <- streamResult{job: job, motion: testMotion(24)}
-	select {
-	case <-h.jobs:
-	case <-time.After(time.Second):
-		t.Fatal("late planner did not recover to ordinary walking")
+	return 0
+}
+func (p fixtureStreamPlanner) actions() bool           { return p.joints == 34 }
+func (p fixtureStreamPlanner) clip(string) *kimodoClip { return nil }
+func (p fixtureStreamPlanner) plan(*mb.Motion, planRequest) (*mb.Motion, error) {
+	return testJointMotion(24, p.joints, p.joints == 77), nil
+}
+
+func TestStreamSupersedesPendingPlan(t *testing.T) {
+	for _, joints := range []int{34, 77} {
+		t.Run(fmt.Sprint(joints), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			h := &streamHub{backend: fixtureStreamPlanner{joints}, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 8), input: make(chan streamInput, 8), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
+			go h.run()
+			defer h.Close()
+			a, b := net.Pipe()
+			defer b.Close()
+			p := &streamPeer{conn: a, events: make(chan streamWire, 32), poses: make(chan []byte, 1), done: make(chan struct{})}
+			h.join <- streamJoin{peer: p}
+			take := func() streamPlan {
+				t.Helper()
+				select {
+				case job := <-h.jobs:
+					return job
+				case <-time.After(time.Second):
+					t.Fatal("planner was not scheduled")
+					return streamPlan{}
+				}
+			}
+			first := take()
+			h.results <- streamResult{job: first, motion: testJointMotion(40, joints, joints == 77)}
+			h.input <- streamInput{p, streamCommand{Type: "control", Seq: 1, Style: "walk", Move: [2]float32{0, 1}, Facing: [2]float32{0, 1}}}
+			stale := take()
+			h.input <- streamInput{p, streamCommand{Type: "control", Seq: 2, Style: "walk", Move: [2]float32{1, 0}, Facing: [2]float32{1, 0}}}
+			// Wait for receipt of revision 2 before delivering the obsolete result.
+			deadline := time.After(time.Second)
+			for {
+				select {
+				case event := <-p.events:
+					var v map[string]any
+					json.Unmarshal(event.data, &v)
+					if v["type"] == "ack" && v["seq"] == float64(2) && v["state"] == "received" {
+						goto received
+					}
+				case <-deadline:
+					t.Fatal("control not received")
+				}
+			}
+		received:
+			// An obsolete result is discarded even if it contains an inference error.
+			h.results <- streamResult{job: stale, err: fmt.Errorf("obsolete inference failure")}
+			newest := take()
+			if newest.seq != 2 || newest.command.Move != [2]float32{1, 0} || newest.revision == stale.revision {
+				t.Fatal("did not replace obsolete plan", newest)
+			}
+			if newest.context.Joints != uint64(joints) {
+				t.Fatal("context skeleton changed")
+			}
+			deadline = time.After(50 * time.Millisecond)
+			for {
+				select {
+				case event := <-p.events:
+					var v map[string]any
+					json.Unmarshal(event.data, &v)
+					if v["type"] == "error" || (v["type"] == "ack" && v["seq"] == float64(1) && v["state"] == "scheduled") {
+						t.Fatal("obsolete result affected playback", v)
+					}
+				case <-deadline:
+					return
+				}
+			}
+		})
 	}
 }

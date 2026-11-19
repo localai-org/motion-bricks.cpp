@@ -11,6 +11,7 @@ use MotionBricks without SONIC, SONIC without MotionBricks, or combine them.
 | MotionBricks G1 | Stateless model pipeline | [`inference.h`](../include/motionbricks/inference.h), `mb_model_infer` | Normalization, root/duration network, pose sampling, VQ decoding, motion-representation decoding | Explicit source/target constraints, duration mask, seed; your controller, style choice, placement and seams |
 | MotionBricks G1 | Optional input adapter | `inference.h`, `mb_inference_request_set_boundary_poses` | FK and conversion of local skeletal poses to model features | Two already-placed four-frame boundaries in a common canonical frame |
 | MotionBricks G1 | Stateful animation controller | [`motionbricks.h`](../include/motionbricks/motionbricks.h), `mb_agent_*` | Context history, style sampling, spring targets, canonicalization, inference, world restoration and seam blending | Style, direction/facing, speed/target, seed, when to plan and advance |
+| MotionBricks SOMA | Retargetable pose-to-pose inference | `inference.h`, `mb_model_infer` | Skeleton encoding, prediction, decoding and endpoint correction | Skeleton mapping, four context poses, one to four target poses; your controller |
 | SONIC G1 mode 0 | Policy inference | [`sonic.h`](../include/motionbricks/sonic.h), `mb_sonic_encode/decode` | Reference encoder + FSQ tokens; observation decoder → actions | Reference observations, measured-state history, timing, motor scaling, controller and simulator |
 | MuJoCo + SONIC | Stateful physics controller | [`physics.h`](../include/motionbricks/physics.h), `mb_physics_*` | Native-pose adaptation, observation history, SONIC calls, motor targets/PD torques, physics steps | SONIC handle, scene/config, reference motion and reference time |
 
@@ -38,6 +39,7 @@ packages. Each model is loaded only when you call its load function.
 ## Detailed guides
 
 - [MotionBricks stateless inference, feature layouts and C example](API-INFERENCE.md)
+- [SOMA setup, retargeting and chained motion](API-SOMA.md)
 - [MotionBricks stateful controller and common ownership rules](#stateful-motionbricks)
 - [SONIC inference observations and optional physics](API-SONIC-PHYSICS.md)
 - [Model/style formats](FORMATS.md), [sampling semantics](SAMPLING.md)

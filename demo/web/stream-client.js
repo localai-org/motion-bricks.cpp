@@ -1,11 +1,12 @@
 // Timestamped, bounded playback. Rendering never drives the server clock.
 export class PoseBuffer {
-  constructor(delay=.15) { this.delay=delay;this.reset(); }
+  constructor(delay=.15,joints=34) { this.joints=joints;this.delay=delay;this.reset(); }
   reset() {this.frames=[];this.epoch=null;this.time=null;this.waiting=true;this.underruns=0;this.received=0;}
   push(frame) {
     const valid=(a,n)=>Array.isArray(a)&&a.length===n&&a.every(x=>Number.isFinite(x)&&Math.abs(x)<=10000);
-    if(frame.type!=='frame'||!Number.isSafeInteger(frame.epoch)||!Number.isSafeInteger(frame.tick)||!Number.isFinite(frame.time)||frame.time<0||!valid(frame.root,3)||!valid(frame.rotations,136)||(frame.physics&&!valid(frame.physical,90)))throw new Error('Invalid or extreme streamed pose');
-    for(let i=0;i<136;i+=4){let norm=0;for(let j=0;j<4;j++)norm+=frame.rotations[i+j]**2;if(Math.abs(norm-1)>.02)throw new Error('Invalid streamed quaternion');}
+    if(frame.type!=='frame'||!Number.isSafeInteger(frame.epoch)||!Number.isSafeInteger(frame.tick)||!Number.isFinite(frame.time)||frame.time<0||!valid(frame.root,3)||!valid(frame.rotations,this.joints*4)||(frame.physics&&!valid(frame.physical,90)))throw new Error('Invalid or extreme streamed pose');
+    for(let i=0;i<this.joints*4;i+=4){let norm=0;for(let j=0;j<4;j++)norm+=frame.rotations[i+j]**2;if(Math.abs(norm-1)>.02)throw new Error('Invalid streamed quaternion');}
+    if(frame.local_positions!==undefined&&!valid(frame.local_positions,this.joints*3))throw new Error('Invalid local joint translations');
     if(frame.collision_transforms!==undefined){
       const c=frame.collision_transforms;
       if(!Array.isArray(c)||c.length%7||c.length>1024*7||!valid(c,c.length))throw new Error('Invalid collision transforms');
@@ -14,6 +15,7 @@ export class PoseBuffer {
     if(this.epoch!==null&&frame.epoch<this.epoch)return;
     if(frame.epoch!==this.epoch){this.reset();this.epoch=frame.epoch;}
     const last=this.frames.at(-1);
+    if(last&&Boolean(last.local_positions)!==Boolean(frame.local_positions))throw new Error("Stream pose layout changed within epoch");
     if(last&&frame.time<=last.time){if(frame.time===last.time)this.frames[this.frames.length-1]=frame;return;}
     this.frames.push(frame);this.received++;
     if(this.frames.length>128){this.frames.splice(0,this.frames.length-128);this.waiting=true;this.time=null;}
@@ -41,17 +43,17 @@ export class PoseBuffer {
 }
 
 export class StreamClient {
-  constructor(callback) {this.callback=callback;this.buffer=new PoseBuffer();this.seq=0;this.owner=false;this.closed=false;this.retry=null;this.connect();this.ping=setInterval(()=>this.send('ping'),10000);}
+  constructor(callback,{model="g1",joints=34}={}) {this.model=model;this.tokenKey=model==="g1"?"motionbricks-stream-token":`motionbricks-stream-token-${model}`;this.callback=callback;this.buffer=new PoseBuffer(.15,joints);this.seq=0;this.owner=false;this.closed=false;this.retry=null;this.connect();this.ping=setInterval(()=>this.send('ping'),10000);}
   connect(){
     if(this.closed)return;
-    const token=sessionStorage.getItem('motionbricks-stream-token')??'';
-    const url=new URL('/api/stream/socket',location.href);url.protocol=location.protocol==='https:'?'wss:':'ws:';if(token)url.searchParams.set('resume',token);
+    const token=sessionStorage.getItem(this.tokenKey)??'';
+    const url=new URL('/api/stream/socket',location.href);if(this.model!=='g1')url.searchParams.set('model',this.model);url.protocol=location.protocol==='https:'?'wss:':'ws:';if(token)url.searchParams.set('resume',token);
     const socket=this.socket=new WebSocket(url);
     socket.onmessage=event=>{try{
       const message=JSON.parse(event.data);
       if(message.type==='hello'){
         if(message.version!==1)throw new Error('Unsupported stream version');
-        this.owner=message.owner;this.seq=Math.max(this.seq,message.last_seq??0);if(message.token)sessionStorage.setItem('motionbricks-stream-token',message.token);
+        this.owner=message.owner;this.seq=Math.max(this.seq,message.last_seq??0);if(message.token)sessionStorage.setItem(this.tokenKey,message.token);
         this.callback(message);if(this.owner)this.send('resume');return;
       }
       if(message.type==='frame')this.buffer.push(message);

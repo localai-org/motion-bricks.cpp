@@ -54,6 +54,12 @@ func TestStreamPoseBuffer(t *testing.T) {
  for(const c of [[0,0,0,0,0,0,2],[NaN,0,0,0,0,0,1],[1,2]]) {
    let rejected=false;try{p.push({...pose(1,3),collision_transforms:c})}catch{rejected=true}assert(rejected,'invalid collision transform accepted');
  }
+ const soma=new PoseBuffer(.15,77);
+ const somaPose=i=>({...pose(i),rotations:Array.from({length:308},(_,j)=>j%4===3?1:0),local_positions:Array(231).fill(.1)});
+ soma.push(somaPose(0));soma.push(somaPose(1));assert(soma.frames.length===2,'SOMA stream rejected');
+ for(const mutate of [f=>f.rotations.splice(136),f=>f.local_positions.pop(),f=>f.local_positions[0]=NaN,f=>delete f.local_positions]) {
+   const f=somaPose(2);mutate(f);let rejected=false;try{soma.push(f)}catch{rejected=true}assert(rejected,'invalid SOMA pose layout accepted');
+ }
  const {CollisionGeometry}=await import('/web/collision-geometry.js');const THREE=await import('/web/vendor/three.module.min.js');
  const overlay=new CollisionGeometry([{type:6,name:'sole',size:[.085,.03,.005]}]);
  overlay.pose([0,.005,0,-.5,-.5,-.5,.5],[1,.005,0,-.5,-.5,-.5,.5],.5);

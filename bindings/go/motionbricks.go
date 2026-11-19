@@ -194,20 +194,29 @@ type Joint struct {
 	Position [3]float32 `json:"position"`
 }
 type Motion struct {
-	Frames    uint64     `json:"frames"`
-	Joints    uint64     `json:"joints"`
-	Roots     []float32  `json:"roots"`
-	Rotations []float32  `json:"rotations"`
-	Targets   *Keyframes `json:"-"`
+	// Optional frame-major [Frames, Joints, 3] local translations for models
+	// whose non-root offsets vary. G1 uses its fixed skeleton and omits these.
+	LocalPositions []float32  `json:"local_positions,omitempty"`
+	Frames         uint64     `json:"frames"`
+	Joints         uint64     `json:"joints"`
+	Roots          []float32  `json:"roots"`
+	Rotations      []float32  `json:"rotations"`
+	Targets        *Keyframes `json:"-"`
 }
 type Keyframes struct {
-	Frames    uint64    `json:"frames"`
-	Joints    uint64    `json:"joints"`
-	Roots     []float32 `json:"roots"`
-	Rotations []float32 `json:"rotations"`
+	// Optional frame-major [Frames, Joints, 3] target local translations.
+	LocalPositions []float32 `json:"local_positions,omitempty"`
+	Frames         uint64    `json:"frames"`
+	Joints         uint64    `json:"joints"`
+	Roots          []float32 `json:"roots"`
+	Rotations      []float32 `json:"rotations"`
 }
 
 func (l *Library) LoadModel(path string, device Device) (*Model, error) {
+	return l.LoadModelKind(path, device, ModelG1)
+}
+
+func (l *Library) LoadModelKind(path string, device Device, kind ModelKind) (*Model, error) {
 	pathBytes, err := cString(path)
 	if err != nil {
 		return nil, err
@@ -220,6 +229,17 @@ func (l *Library) LoadModel(path string, device Device) (*Model, error) {
 	defer l.optionsFree(options)
 	if err = l.check("select device", l.optionsSetDevice(options, uint32(device), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
 		return nil, err
+	}
+	if kind != ModelG1 {
+		var setKind func(uintptr, uint32, unsafe.Pointer, uint64) uint32
+		address, err := lookupSymbol(l.handle, "mb_runtime_options_set_model_kind")
+		if err != nil {
+			return nil, err
+		}
+		purego.RegisterFunc(&setKind, address)
+		if err = l.check("select model kind", setKind(options, uint32(kind), errorPointer(buffer), uint64(len(buffer))), buffer); err != nil {
+			return nil, err
+		}
 	}
 	var handle uintptr
 	status := l.modelLoad(unsafe.Pointer(&pathBytes[0]), options, unsafe.Pointer(&handle), errorPointer(buffer), uint64(len(buffer)))

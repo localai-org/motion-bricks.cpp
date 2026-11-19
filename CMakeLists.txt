@@ -27,11 +27,16 @@ option(MOTIONBRICKS_ENABLE_GGML "Use the pinned GGML submodule when present" ON)
 option(MOTIONBRICKS_ENABLE_LLAMAFILE "Use GGML's Llamafile CPU matrix kernels" ON)
 option(MOTIONBRICKS_CPU_ALL_VARIANTS "Build GGML CPU variants and select at runtime" ON)
 option(MOTIONBRICKS_ENABLE_VULKAN "Enable the GGML Vulkan backend" ON)
+option(MOTIONBRICKS_ENABLE_SOMA_VULKAN_SHADERS "Build scoped SOMA SM120 Vulkan arithmetic shaders" OFF)
 option(MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS "Run hardware-dependent Vulkan parity tests" OFF)
+option(MOTIONBRICKS_ENABLE_SOMA_CALIBRATED_TESTS "Run slow SOMA CPU parity tests requiring captured fixtures and calibration tables" OFF)
 option(MOTIONBRICKS_ENABLE_FUZZERS "Build libFuzzer targets" OFF)
 option(MOTIONBRICKS_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-option(MOTIONBRICKS_ENABLE_PHYSICS "Enable native MuJoCo / GGML SONIC simulation (3.12.0 or 3.3.5 reference)" OFF)
+option(MOTIONBRICKS_ENABLE_PHYSICS "Enable native MuJoCo / GGML SONIC simulation (4.0.1 or 3.3.5 reference)" OFF)
 option(MOTIONBRICKS_DOWNLOAD_MODELS "Download and verify the published runtime model/style bundle" ON)
+if(MOTIONBRICKS_ENABLE_SOMA_VULKAN_SHADERS AND (NOT MOTIONBRICKS_ENABLE_GGML OR NOT MOTIONBRICKS_ENABLE_VULKAN))
+    message(FATAL_ERROR "SOMA Vulkan shaders require GGML and Vulkan")
+endif()
 set(MOTIONBRICKS_GGML_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml" CACHE PATH
     "Pinned GGML submodule source directory")
 set(MOTIONBRICKS_MODEL_REPOSITORY "LocalAI-io/MotionBricks-G1-GGML" CACHE STRING
@@ -40,6 +45,8 @@ set(MOTIONBRICKS_MODEL_REVISION "cc2a47603dbc203a4f18f35dd06ed3611833f506" CACHE
     "Pinned Hugging Face revision containing the runtime bundle")
 set(MOTIONBRICKS_REFERENCE_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/generated/g1-f32" CACHE PATH
     "Downloaded or locally converted MotionBricks runtime bundle")
+set(MOTIONBRICKS_SOMA_TEST_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/generated/soma/export-scales" CACHE PATH
+    "SOMA parity bundle with exact exported normalization scales")
 set(MOTIONBRICKS_REFERENCE_STYLES "${CMAKE_CURRENT_SOURCE_DIR}/generated/styles" CACHE PATH
     "Downloaded or locally converted MotionBricks style bundle")
 set(MOTIONBRICKS_VULKAN_PARITY_DEVICE "0" CACHE STRING
@@ -82,7 +89,7 @@ set(MOTIONBRICKS_SOURCES
     src/pose.cpp)
 list(APPEND MOTIONBRICKS_SOURCES src/root.cpp)
 list(APPEND MOTIONBRICKS_SOURCES src/motion_rep.cpp)
-list(APPEND MOTIONBRICKS_SOURCES src/planner.cpp)
+list(APPEND MOTIONBRICKS_SOURCES src/planner.cpp src/soma.cpp src/soma_playback.cpp src/soma_capi.cpp)
 list(APPEND MOTIONBRICKS_SOURCES src/sampling.cpp)
 list(APPEND MOTIONBRICKS_SOURCES src/style.cpp)
 list(APPEND MOTIONBRICKS_SOURCES src/agent.cpp)
@@ -141,11 +148,18 @@ if(MOTIONBRICKS_ENABLE_GGML)
         if(MOTIONBRICKS_CPU_ALL_VARIANTS)
             set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
         endif()
+        set(MOTIONBRICKS_GGML_BUILD_SOURCE "${MOTIONBRICKS_GGML_SOURCE_DIR}")
+        if(MOTIONBRICKS_ENABLE_SOMA_VULKAN_SHADERS)
+            include(cmake/SomaVulkan.cmake)
+            motionbricks_prepare_soma_vulkan(MOTIONBRICKS_GGML_BUILD_SOURCE)
+            target_compile_definitions(motionbricks_shared PUBLIC $<BUILD_INTERFACE:MOTIONBRICKS_HAVE_SOMA_VULKAN_SHADERS=1>)
+            target_compile_definitions(motionbricks_static PUBLIC $<BUILD_INTERFACE:MOTIONBRICKS_HAVE_SOMA_VULKAN_SHADERS=1>)
+        endif()
         # GGML's module targets require an output directory, including when
         # only a library target (rather than an executable) is requested.
         block()
             set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-            add_subdirectory("${MOTIONBRICKS_GGML_SOURCE_DIR}"
+            add_subdirectory("${MOTIONBRICKS_GGML_BUILD_SOURCE}"
                              "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
         endblock()
         get_target_property(MOTIONBRICKS_GGML_HEADERS ggml PUBLIC_HEADER)
@@ -199,7 +213,7 @@ endif()
 
 if(MOTIONBRICKS_ENABLE_PHYSICS)
     find_path(MUJOCO_INCLUDE_DIR mujoco/mujoco.h REQUIRED)
-    find_library(MUJOCO_LIBRARY NAMES mujoco libmujoco.so.3.12.0 libmujoco.so.3.3.5 REQUIRED)
+    find_library(MUJOCO_LIBRARY NAMES mujoco libmujoco.so.4.0.1 libmujoco.so.3.12.0 libmujoco.so.3.3.5 REQUIRED)
     foreach(target motionbricks_shared motionbricks_static)
         target_include_directories(${target} PRIVATE "${MUJOCO_INCLUDE_DIR}")
         target_link_libraries(${target} PRIVATE "${MUJOCO_LIBRARY}")

@@ -18,13 +18,17 @@ import (
 	mb "github.com/localai/motion-bricks.cpp/bindings/go"
 )
 
-func testMotion(frames int) *mb.Motion {
-	m := &mb.Motion{Frames: uint64(frames), Joints: 34, Roots: make([]float32, frames*3), Rotations: make([]float32, frames*136)}
+func testMotion(frames int) *mb.Motion { return testJointMotion(frames, 34, false) }
+func testJointMotion(frames, joints int, positions bool) *mb.Motion {
+	m := &mb.Motion{Frames: uint64(frames), Joints: uint64(joints), Roots: make([]float32, frames*3), Rotations: make([]float32, frames*joints*4)}
 	for i := 0; i < frames; i++ {
 		m.Roots[i*3] = float32(i) / 30
 		m.Roots[i*3+1] = 1
-		for j := 0; j < 34; j++ {
-			m.Rotations[i*136+j*4+3] = 1
+		for j := 0; j < joints; j++ {
+			m.Rotations[(i*joints+j)*4+3] = 1
+			if positions {
+				m.LocalPositions = append(m.LocalPositions, float32(j)*.001+float32(i)*.0001, .1, 0)
+			}
 		}
 	}
 	return m
@@ -69,7 +73,10 @@ func TestStreamBrowser(t *testing.T) {
 	}
 	for _, delay := range []int{0, 100} {
 		t.Run(fmt.Sprint(delay), func(t *testing.T) {
-			lib := filepath.Join(root, "build/debug/libmotionbricks.so")
+			lib := os.Getenv("MOTIONBRICKS_LIB")
+			if lib == "" {
+				lib = filepath.Join(root, "build/debug/libmotionbricks.so")
+			}
 			s, err := loadDemoServer(lib, filepath.Join(root, "generated/g1-f32"), filepath.Join(root, "generated/styles"), mb.DeviceVulkan)
 			if err != nil {
 				t.Fatal(err)
@@ -88,7 +95,7 @@ func TestStreamBrowser(t *testing.T) {
 				triangles += len(shape.Indices) / 3
 			}
 			t.Logf("collision overlay: %d shapes, %d hull triangles", len(p.CollisionShapes()), triangles)
-			h := newStreamHub(s, p)
+			h := newStreamHub(g1StreamPlanner{s}, p)
 			defer h.Close()
 			endpoint := httptest.NewServer(h.routes(s.routes()))
 			defer endpoint.Close()
@@ -264,5 +271,66 @@ func TestStreamBrowser(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStreamTimelineLocalTranslations(t *testing.T) {
+	original := testJointMotion(60, 77, true)
+	r := referenceTimeline{motion: original}
+	at := 16
+	context := r.context(at - 3)
+	if len(context.LocalPositions) != 4*77*3 {
+		t.Fatal("SOMA context lost translations")
+	}
+	for k, v := range context.LocalPositions[3*77*3:] {
+		if v != original.LocalPositions[at*77*3+k] {
+			t.Fatal("SOMA context does not end at seam")
+		}
+	}
+	next := testJointMotion(40, 77, true)
+	for i := range next.LocalPositions {
+		next.LocalPositions[i] += .02
+	}
+	oldRoot, oldRot := r.sample(float64(at))
+	oldPos := sampleLocalPositions(original, float64(at))
+	if err := r.replace(at, next, 5, true); err != nil {
+		t.Fatal(err)
+	}
+	root, rot := r.sample(float64(at))
+	pos := sampleLocalPositions(r.motion, float64(at-r.base))
+	for i, v := range pos {
+		if v != oldPos[i] {
+			t.Fatal("local seam moved")
+		}
+	}
+	for i, v := range rot {
+		if v != oldRot[i] {
+			t.Fatal("rotational seam moved")
+		}
+	}
+	for i, v := range root {
+		if v != oldRoot[i] {
+			t.Fatal("root seam moved")
+		}
+	}
+	past := sampleLocalPositions(r.motion, float64(4-r.base))
+	for i, v := range past {
+		if v != original.LocalPositions[4*77*3+i] {
+			t.Fatal("changed committed pose")
+		}
+	}
+	midpoint := sampleLocalPositions(r.motion, 20.5-float64(r.base))
+	a, b := sampleLocalPositions(r.motion, float64(20-r.base)), sampleLocalPositions(r.motion, float64(21-r.base))
+	for i, v := range midpoint {
+		if math.Abs(float64(v-(a[i]+b[i])/2)) > 1e-7 {
+			t.Fatal("local translations not interpolated")
+		}
+	}
+	if err := r.replace(30, testMotion(24), 10, true); err == nil {
+		t.Fatal("accepted different skeleton")
+	}
+	next = testJointMotion(24, 77, false)
+	if err := r.replace(30, next, 10, true); err == nil {
+		t.Fatal("accepted missing translations")
 	}
 }

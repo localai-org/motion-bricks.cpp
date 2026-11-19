@@ -1,0 +1,10 @@
+{
+  "format": "motionbricks-soma-chain-tolerances-v1",
+  "position_m": 0.0001,
+  "rotation_deg": 0.01,
+  "contacts_absolute": 0.0001,
+  "duration_exact": true,
+  "pose_tokens_exact": true,
+  "scope": "Captured walking, sitting and turning chains; CPU and Vulkan replay and independent feedback",
+  "rationale": "0.1 mm position and 0.01 degree rotation ceilings exceed measured FP32 cross-backend maxima of 0.00558 mm and 0.000827 degrees; the 0.0001 contact ceiling exceeds the measured 0.0000685 maximum. These are fixture regression limits, not a guarantee for arbitrary motions or acceptance of mixed-FP16 drift."
+}

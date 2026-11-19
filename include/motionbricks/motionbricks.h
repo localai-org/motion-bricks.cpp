@@ -70,6 +70,24 @@ MB_API mb_status mb_runtime_options_get_backend_directory(const mb_runtime_optio
                                                           const char ** output,
                                                           char * error, uint64_t error_capacity);
 
+/* Model family is selected before loading. Default G1 preserves existing callers. */
+#define MB_MODEL_G1 UINT32_C(0)
+#define MB_MODEL_SOMA UINT32_C(1)
+MB_API mb_status mb_runtime_options_set_model_kind(mb_runtime_options *, uint32_t kind, char *, uint64_t);
+MB_API mb_status mb_runtime_options_get_model_kind(const mb_runtime_options *, uint32_t * kind, char *, uint64_t);
+MB_API mb_status mb_model_get_kind(const mb_model *, uint32_t * kind, char *, uint64_t);
+/* Diagnostic CPU arithmetic emulation; not required for normal FP32 use. */
+MB_API mb_status mb_model_set_arithmetic_calibration(mb_model *, const char * rsqrt, const char * exp2, char *, uint64_t);
+/* Borrowed buffers, valid until motion_free. Empty when unavailable. */
+MB_API mb_status mb_motion_get_local_translations(const mb_motion *, const float **, uint64_t *, char *, uint64_t);
+MB_API mb_status mb_motion_get_token_count(const mb_motion *, uint32_t *, char *, uint64_t);
+#define MB_MOTION_LOCAL_TRANSFORMS UINT32_C(0)
+#define MB_MOTION_WORLD_TRANSFORMS UINT32_C(1)
+#define MB_MOTION_FEATURES UINT32_C(2)
+#define MB_MOTION_CONTACTS UINT32_C(3)
+/* Copies optional model output; NULL/zero queries size. */
+MB_API mb_status mb_motion_copy_field(const mb_motion *, uint32_t field, float *, uint64_t, uint64_t *, char *, uint64_t);
+
 /* A command is independent of compiler layout and may be reused between plans. */
 MB_API mb_status mb_command_create(mb_command ** output,
                                    char * error, uint64_t error_capacity);

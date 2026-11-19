@@ -4,14 +4,14 @@
 
 [![LocalAI](https://img.shields.io/badge/LocalAI-Run_Locally-orange)](https://github.com/mudler/LocalAI)
 
-A C++23/GGML port of NVIDIA MotionBricks for CPU and Vulkan inference, with a
-stable C ABI suitable for PureGo.
+Run NVIDIA MotionBricks locally to generate motion for G1 robots and SOMA human
+characters, using CPU or Vulkan. The interactive demo lets you select a model
+and control its movement.
 
-The released batch-one G1 inference path is implemented end to end: strict
-GGUF loading, root/duration planning, pose-token prediction, VQ decoding,
-418/414/413 feature conversion, style alignment, and skeletal animation
-output. CPU and Vulkan use the same public API and preserve the same duration
-and pose-token decisions in the reference suite.
+Embed it in your own application with the **FFI-friendly C API**. Both models
+use the same opaque model, request and motion handles; Go bindings are included.
+See the [API guide](docs/API.md), [SOMA usage](docs/API-SOMA.md), and
+[demo setup](docs/DEMO.md).
 
 The demo also offers optional native MuJoCo physics driven by **GGML SONIC**,
 including Kimodo animation playback, with target/reference/physical skeletons.
@@ -19,7 +19,7 @@ The original G1 mode-0 policy passes independent CPU/Vulkan layer parity.
 The optional [human-pose SMPL encoder](docs/SONIC-SMPL.md) also runs natively;
 connecting it to streamed poses and the simulation is a separate integration step.
 See [SONIC setup, results and limitations](docs/SONIC-GGML.md) and the
-[MuJoCo 3.12 upgrade notes](docs/MUJOCO-UPGRADE.md).
+[MuJoCo upgrade notes](docs/MUJOCO-UPGRADE.md).
 The browser sends WebSocket commands and renders buffered server-owned motion;
 see [streaming and client QA](docs/STREAMING.md).
 

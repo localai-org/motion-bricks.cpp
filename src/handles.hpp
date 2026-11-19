@@ -10,15 +10,19 @@
 
 namespace motionbricks::detail {
 class neural_runtime;
+struct soma_api_skeleton;
 }
 
 struct mb_runtime_options {
+    uint32_t model_kind = 0;
     mb_device device = MB_DEVICE_AUTO;
     std::uint32_t threads = 0;
     std::string backend_directory;
 };
 
 struct mb_model {
+    uint32_t kind = 0;
+    bool calibrated = false;
     std::string bundle_directory;
     std::uint64_t parameter_count = 0;
     std::vector<std::string> joint_names;
@@ -68,6 +72,9 @@ struct mb_agent {
 };
 
 struct mb_motion {
+    uint32_t tokens = 0;
+    std::array<std::vector<float>,4> fields;
+    std::vector<float> local_translations;
     std::uint64_t frames = 0;
     std::uint64_t joints = 0;
     std::vector<float> root_translations;
