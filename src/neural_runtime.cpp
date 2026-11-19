@@ -1,9 +1,12 @@
 #include "neural_runtime.hpp"
+#include "neural_precision.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -112,6 +115,8 @@ bool copy_gguf_data(const std::filesystem::path & path, ggml_context * tensors,
 
 class neural_runtime {
 public:
+    mutable std::vector<neural_tensor_trace> * trace_sink = nullptr;
+    mutable std::string trace_prefix;
     struct component {
         std::string name;
         context_ptr context;
@@ -152,19 +157,6 @@ mb_status initialize_backend(neural_runtime & runtime, mb_device selected,
     static std::mutex registry_mutex;
     const std::lock_guard lock(registry_mutex);
     try {
-#if defined(MOTIONBRICKS_HAVE_VULKAN)
-        // Set these before module discovery, which can initialize Vulkan.
-        // Keep the released F32 model's parity contract on every backend.
-#if defined(_WIN32)
-        _putenv_s("GGML_VK_DISABLE_F16", "1");
-        _putenv_s("GGML_VK_DISABLE_COOPMAT", "1");
-        _putenv_s("GGML_VK_DISABLE_COOPMAT2", "1");
-#else
-        setenv("GGML_VK_DISABLE_F16", "1", 0);
-        setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
-        setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
-#endif
-#endif
 #if defined(GGML_BACKEND_DL)
         // Selection is process-wide. An explicit path overrides the bundled
         // location on first load; failed discovery remains retryable.
@@ -176,6 +168,35 @@ mb_status initialize_backend(neural_runtime & runtime, mb_device selected,
         }
 #else
         (void) directory;
+#endif
+#if defined(MOTIONBRICKS_HAVE_VULKAN)
+        // Device creation is lazy. Query the loaded overlay before initializing
+        // a logical Vulkan device; CPU-first loading must not disable it.
+        bool keep_half = native_half_operands_requested();
+#if defined(MOTIONBRICKS_HAVE_SOMA_VULKAN_SHADERS)
+        if (selected == MB_DEVICE_VULKAN) {
+            const auto reg = ggml_backend_reg_by_name("Vulkan");
+            if (reg && ggml_backend_reg_dev_count(reg) > 0) {
+                using query_type = bool (*)(ggml_backend_dev_t);
+                const auto query = reinterpret_cast<query_type>(ggml_backend_reg_get_proc_address(
+                    reg, "motionbricks_soma_vulkan_can_enable_v1"));
+                keep_half = keep_half || (query && query(ggml_backend_reg_dev_get(reg, 0)));
+            }
+        }
+#endif
+        // Preserve scalar FP32 on ordinary backends and unqualified devices.
+        // Explicit user disable flags remain effective on qualified devices.
+        if (selected == MB_DEVICE_VULKAN && !keep_half) {
+#if defined(_WIN32)
+        _putenv_s("GGML_VK_DISABLE_F16", "1");
+        _putenv_s("GGML_VK_DISABLE_COOPMAT", "1");
+        _putenv_s("GGML_VK_DISABLE_COOPMAT2", "1");
+#else
+        setenv("GGML_VK_DISABLE_F16", "1", 0);
+        setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
+        setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
+#endif
+        }
 #endif
         if (selected == MB_DEVICE_CPU) {
             runtime.backend.reset(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
@@ -260,7 +281,91 @@ ggml_backend_t neural_backend(const neural_runtime & runtime) noexcept {
     return runtime.backend.get();
 }
 
+neural_trace_scope::neural_trace_scope(const neural_runtime & runtime,
+    std::vector<neural_tensor_trace> & sink, std::string prefix)
+    : runtime_(runtime), previous_(runtime.trace_sink), previous_prefix_(runtime.trace_prefix) {
+    runtime.trace_sink = &sink;
+    runtime.trace_prefix = std::move(prefix);
+}
+
+neural_trace_scope::~neural_trace_scope() {
+    runtime_.trace_sink = previous_;
+    runtime_.trace_prefix = std::move(previous_prefix_);
+}
+
+ggml_status neural_graph_compute(const neural_runtime & runtime, ggml_cgraph * graph) {
+    const auto status = ggml_backend_graph_compute(runtime.backend.get(), graph);
+    if (status != GGML_STATUS_SUCCESS || !runtime.trace_sink) return status;
+    // Current graphs allocate each context tensor separately, so intermediates
+    // remain live after compute. Do not use this with a liveness-reusing allocator.
+    for (int node = 0; node < ggml_graph_n_nodes(graph); ++node) {
+        const auto * tensor = ggml_graph_node(graph, node);
+        if (ggml_blck_size(tensor->type) != 1)
+            throw std::runtime_error("cannot trace block-quantized intermediate");
+        const auto element = ggml_type_size(tensor->type);
+        neural_tensor_trace trace;
+        trace.name = runtime.trace_prefix + "/" + std::to_string(node) + "/" + ggml_get_name(tensor);
+        trace.operation = ggml_op_name(tensor->op);
+        trace.type = static_cast<int>(tensor->type);
+        std::copy_n(tensor->ne, 4, trace.shape.begin());
+        trace.data.resize(static_cast<std::size_t>(ggml_nelements(tensor)) * element);
+        std::vector<std::byte> storage(ggml_nbytes(tensor));
+        ggml_backend_tensor_get(tensor, storage.data(), 0, storage.size());
+        std::size_t destination = 0;
+        for (std::int64_t d = 0; d < tensor->ne[3]; ++d)
+            for (std::int64_t c = 0; c < tensor->ne[2]; ++c)
+                for (std::int64_t b = 0; b < tensor->ne[1]; ++b)
+                    for (std::int64_t a = 0; a < tensor->ne[0]; ++a) {
+                        const auto source = a*tensor->nb[0]+b*tensor->nb[1]+c*tensor->nb[2]+d*tensor->nb[3];
+                        std::memcpy(trace.data.data()+destination, storage.data()+source, element);
+                        destination += element;
+                    }
+        runtime.trace_sink->push_back(std::move(trace));
+    }
+    return status;
+}
+
 mb_device neural_device(const neural_runtime & runtime) noexcept { return runtime.device; }
+
+bool neural_soma_vulkan_sm120(const neural_runtime & runtime, std::string & reason) {
+#if defined(MOTIONBRICKS_HAVE_SOMA_VULKAN_SHADERS)
+    if (runtime.device != MB_DEVICE_VULKAN) {
+        reason = "the SOMA Vulkan SM120 profile requires a Vulkan model";
+        return false;
+    }
+    const auto device = ggml_backend_get_device(runtime.backend.get());
+    const auto reg = ggml_backend_dev_backend_reg(device);
+    using query_type = bool (*)(ggml_backend_dev_t, std::uint32_t *, std::size_t);
+    const auto query = reinterpret_cast<query_type>(ggml_backend_reg_get_proc_address(
+        reg, "motionbricks_soma_vulkan_info_v1"));
+    if (!query) {
+        reason = "the loaded Vulkan backend lacks the SOMA arithmetic overlay";
+        return false;
+    }
+    std::array<std::uint32_t, 8> info{};
+    if (!query(device, info.data(), info.size()) || info[0] != 1) {
+        reason = "the loaded Vulkan backend has an incompatible SOMA arithmetic protocol";
+        return false;
+    }
+    // Captured RTX 5070 Ti, NVIDIA proprietary Linux driver 595.71.05.
+    // NVIDIA packs its Vulkan driver version as 10:8:8:6 bits.
+    if (info[1] != 0x10de || info[2] != 0x2c05 || info[3] != 0x94d1c140 ||
+        info[6] != 32 || info[7] != 4) {
+        reason = "SOMA Vulkan SM120 parity is qualified only for RTX 5070 Ti with NVIDIA Linux driver 595.71.05";
+        return false;
+    }
+    if (info[4] != 1 || info[5] != 1) {
+        reason = "SOMA Vulkan SM120 requires enabled FP16 and NV cooperative-matrix-2 capabilities";
+        return false;
+    }
+    reason.clear();
+    return true;
+#else
+    (void) runtime;
+    reason = "this build has no SOMA Vulkan arithmetic overlay";
+    return false;
+#endif
+}
 
 ggml_tensor * neural_weight(const neural_runtime & runtime,
                             std::string_view component, std::string_view name) noexcept {
@@ -298,7 +403,17 @@ bool neural_copy_f32(const neural_runtime & runtime,
 
 class neural_runtime {};
 
+neural_trace_scope::neural_trace_scope(const neural_runtime & runtime,
+    std::vector<neural_tensor_trace> &, std::string)
+    : runtime_(runtime), previous_(nullptr) {}
+neural_trace_scope::~neural_trace_scope() = default;
+
 mb_device neural_device(const neural_runtime &) noexcept { return MB_DEVICE_CPU; }
+
+bool neural_soma_vulkan_sm120(const neural_runtime &, std::string & reason) {
+    reason = "this build has no GGML support";
+    return false;
+}
 
 mb_status create_sonic_runtime(const std::filesystem::path &, mb_device, std::uint32_t,
     const std::string &, std::shared_ptr<neural_runtime> &, std::string & reason) {

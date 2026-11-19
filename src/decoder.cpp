@@ -1,6 +1,7 @@
 #include "decoder.hpp"
 
 #include "neural_runtime.hpp"
+#include "neural_precision.hpp"
 
 #include <array>
 #include <cstddef>
@@ -20,6 +21,30 @@ namespace {
 
 #if defined(MOTIONBRICKS_HAVE_GGML)
 
+std::size_t decoder_graph_capacity(ggml_context * context) {
+    // Include expanded convolution operations and external model-weight leaves.
+    std::size_t capacity=1024;
+    for(auto * tensor=ggml_get_first_tensor(context);tensor;tensor=ggml_get_next_tensor(context,tensor))++capacity;
+    return std::max<std::size_t>(2048,capacity);
+}
+
+struct decoder_layout { std::uint32_t latent, target, output; };
+
+bool get_decoder_layout(const neural_runtime & runtime, decoder_layout & layout, std::string & reason) {
+    const auto * initial = neural_weight(runtime, "vq-decoder", "decoder.model.0.weight");
+    const auto * target = neural_weight(runtime, "vq-decoder", "decoder.target_cond_blocks.0.weight");
+    const auto * output = neural_weight(runtime, "vq-decoder", "decoder.model.6.weight");
+    if (!initial || !target || !output) {
+        reason = "missing VQ decoder layout tensors";
+        return false;
+    }
+    const bool soma = initial->ne[1] == 160 && target->ne[0] == 268 && output->ne[2] == 365;
+    const bool g1 = initial->ne[1] == 256 && target->ne[0] == 304 && output->ne[2] == 413;
+    if (!soma && !g1) { reason = "unsupported VQ decoder layout"; return false; }
+    layout = soma ? decoder_layout{160, 268, 365} : decoder_layout{256, 304, 413};
+    return true;
+}
+
 struct context_deleter { void operator()(ggml_context * value) const noexcept { ggml_free(value); } };
 struct buffer_deleter {
     void operator()(ggml_backend_buffer * value) const noexcept { ggml_backend_buffer_free(value); }
@@ -34,9 +59,43 @@ ggml_tensor * weight(const neural_runtime & runtime, const std::string & name,
     return result;
 }
 
+// Stable semantic labels connect native graph snapshots to upstream module outputs.
+ggml_tensor * label_output(ggml_tensor * output, ggml_tensor * bias) {
+    std::string name=ggml_get_name(bias);
+    if(name.ends_with(".bias"))name.resize(name.size()-5);
+    ggml_set_name(output,name.c_str());
+    return output;
+}
+
+ggml_tensor * named_relu(ggml_context * context, ggml_tensor * input) {
+    auto * output=half_round(context,ggml_relu(context,half_round(context,input)));
+    std::string name=ggml_get_name(input);
+    if(name.ends_with(".linear1"))name.replace(name.size()-8,8,".dropout");
+    else if(name.ends_with(".conv1"))name.replace(name.size()-6,6,".activation2");
+    else if(name=="_proj_input.0" || name=="decoder.model.0" || name=="decoder.model.4" ||
+            name=="_conv_output.model.0" || name=="_conv_output.model.4" ||
+            name.find("cond_blocks.")!=std::string::npos)++name.back();
+    else name.clear();
+    if(!name.empty())ggml_set_name(output,name.c_str());
+    return output;
+}
+
+ggml_tensor * named_view(ggml_context * context, ggml_tensor * input, const std::string & name) {
+    auto * output=ggml_view_4d(context,input,input->ne[0],input->ne[1],input->ne[2],input->ne[3],input->nb[1],input->nb[2],input->nb[3],0);
+    ggml_set_name(output,name.c_str());return output;
+}
+
 ggml_tensor * linear(ggml_context * context, ggml_tensor * input,
                      ggml_tensor * matrix, ggml_tensor * bias) {
-    return ggml_add(context, ggml_mul_mat(context, matrix, input), bias);
+    if(neural_half_arithmetic && neural_backend_conditioning_trial &&
+       (std::string(ggml_get_name(matrix)).starts_with("decoder.external_cond_blocks.") ||
+        std::string(ggml_get_name(matrix)).starts_with("decoder.target_cond_blocks."))) {
+        auto * product=precision_backend_prefix_product(context,matrix,input);
+        return label_output(precision_add(context,half_round(context,product),bias),bias);
+    }
+    return label_output(precision_linear(context,input,matrix,bias,
+        (std::string(ggml_get_name(bias)).find("self_attn.out_proj")!=std::string::npos ||
+         std::string(ggml_get_name(bias))=="_proj_num_token_output_logit.bias")),bias);
 }
 
 ggml_tensor * conv(ggml_context * context, ggml_tensor * input,
@@ -45,14 +104,22 @@ ggml_tensor * conv(ggml_context * context, ggml_tensor * input,
     // ggml_conv_1d deliberately lowers ordinary F32 convolutions through an
     // F16 im2col buffer.  MotionBricks' residual decoder is sensitive enough
     // for that loss to become visible, so retain F32 through the lowering.
+    kernel=half_round(context,kernel);input=half_round(context,input);
     auto * columns = ggml_im2col(context, kernel, input, 1, 0, padding, 0,
                                 dilation, 0, false, GGML_TYPE_F32);
-    auto * output = ggml_mul_mat(context,
-        ggml_reshape_2d(context, columns, columns->ne[0], columns->ne[2] * columns->ne[1]),
-        ggml_reshape_2d(context, kernel, kernel->ne[0] * kernel->ne[1], kernel->ne[2]));
+    auto * left=ggml_reshape_2d(context,columns,columns->ne[0],columns->ne[2]*columns->ne[1]);
+    auto * right=ggml_reshape_2d(context,kernel,kernel->ne[0]*kernel->ne[1],kernel->ne[2]);
+    const bool profiled=neural_half_arithmetic && (neural_aligned_matmul_trial || neural_backend_decoder_conv_trial) &&
+        std::string(ggml_get_name(bias)).starts_with("decoder.") &&
+        ((kernel->ne[0]==3 && (kernel->ne[1]==160 || kernel->ne[1]==512)) ||
+         (kernel->ne[0]==1 && kernel->ne[1]==512 && kernel->ne[2]==512));
+    auto * output=profiled?(neural_backend_decoder_conv_trial?precision_backend_conv(context,left,right,kernel->ne[0],kernel->ne[1],dilation):
+        soma_profiled_conv_product(context,left,right,kernel->ne[0],kernel->ne[1],dilation)):
+        precision_product(context,left,right);
     output = ggml_reshape_3d(context, output, columns->ne[1], kernel->ne[2], columns->ne[2]);
     auto * shaped_bias = ggml_reshape_2d(context, bias, 1, bias->ne[0]);
-    return ggml_add(context, output, shaped_bias);
+    // Match the captured CUDA convolution storage followed by half bias addition.
+    return label_output(precision_convolution_bias(context,output,shaped_bias),bias);
 }
 
 ggml_tensor * channels_first_to_frames(ggml_context * context, ggml_tensor * input,
@@ -108,19 +175,22 @@ ggml_tensor * residual_stack(ggml_context * context, const neural_runtime & runt
     for (unsigned block = 0; block < dilations.size(); ++block) {
         const auto prefix = "decoder.model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".";
-        auto * branch = ggml_relu(context, hidden);
+        auto * branch = named_relu(context, named_view(context,hidden,prefix+"norm1"));
+        ggml_set_name(branch,(prefix+"activation1").c_str());
         branch = conv(context, branch,
             weight(runtime, prefix + "conv1.weight", reason),
             weight(runtime, prefix + "conv1.bias", reason), dilations[block], dilations[block]);
         traces.emplace_back("model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".conv1", branch);
-        branch = ggml_relu(context, branch);
+        branch = named_relu(context, named_view(context,branch,prefix+"norm2"));
+        ggml_set_name(branch,(prefix+"activation2").c_str());
         branch = conv(context, branch,
             weight(runtime, prefix + "conv2.weight", reason),
             weight(runtime, prefix + "conv2.bias", reason), 0, 1);
         traces.emplace_back("model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".conv2", branch);
-        hidden = ggml_add(context, hidden, branch);
+        hidden = precision_add(context, hidden, branch);
+        ggml_set_name(hidden, prefix.substr(0,prefix.size()-1).c_str());
     }
     return hidden;
 }
@@ -133,14 +203,15 @@ ggml_tensor * residual_stack_batch(ggml_context * context, const neural_runtime 
     for (unsigned block = 0; block < dilations.size(); ++block) {
         const auto prefix = "decoder.model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".";
-        auto * branch = conv_batch_independent(context, ggml_relu(context, hidden),
+        auto * branch = conv_batch_independent(context, named_relu(context, hidden),
             weight(runtime, prefix + "conv1.weight", reason),
             weight(runtime, prefix + "conv1.bias", reason), dilations[block], dilations[block],
             batch_size);
-        branch = conv_batch_independent(context, ggml_relu(context, branch),
+        branch = conv_batch_independent(context, named_relu(context, branch),
             weight(runtime, prefix + "conv2.weight", reason),
             weight(runtime, prefix + "conv2.bias", reason), 0, 1, batch_size);
-        hidden = ggml_add(context, hidden, branch);
+        hidden = precision_add(context, hidden, branch);
+        ggml_set_name(hidden, prefix.substr(0,prefix.size()-1).c_str());
     }
     return hidden;
 }
@@ -164,10 +235,12 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
     reason = "this build has no GGML support";
     return MB_BACKEND_UNAVAILABLE;
 #else
-    constexpr std::uint32_t latent_width = 256;
+    decoder_layout layout{};
+    if (!get_decoder_layout(runtime, layout, reason)) return MB_INCOMPATIBLE_MODEL;
+    const auto latent_width = layout.latent;
     constexpr std::uint32_t external_width = 2;
-    constexpr std::uint32_t target_width = 304;
-    constexpr std::uint32_t output_width = 413;
+    const auto target_width = layout.target;
+    const auto output_width = layout.output;
     const auto frames = positions * 4U;
     if (positions < 1U || positions > 16U ||
         quantized.size() != static_cast<std::size_t>(positions) * latent_width ||
@@ -197,7 +270,7 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
         weight(runtime, "decoder.model.0.weight", reason),
         weight(runtime, "decoder.model.0.bias", reason), 1, 1);
     traces.emplace_back("model.0", initial_conv);
-    auto * hidden = ggml_relu(context.get(), initial_conv);
+    auto * hidden = named_relu(context.get(), initial_conv);
     for (unsigned stage_index = 0; stage_index < 2U; ++stage_index) {
         const unsigned stage = stage_index + 2U;
         const auto frame_group = 1U << (2U - stage_index);
@@ -210,9 +283,7 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
         traces.emplace_back("target_cond_blocks." + std::to_string(stage_index * 2U), target_embedding);
         auto * hidden_frames = channels_first_to_frames(context.get(), hidden, 512, stage_positions);
         hidden_frames = ggml_reshape_2d(context.get(), hidden_frames, 512 / frame_group, stage_frames);
-        hidden_frames = ggml_add(context.get(), hidden_frames,
-            ggml_mul(context.get(), ggml_sub(context.get(), ggml_relu(context.get(), target_embedding), hidden_frames),
-                     target_mask));
+        hidden_frames = precision_blend(context.get(),hidden_frames,named_relu(context.get(),target_embedding),target_mask);
         hidden_frames = ggml_reshape_2d(context.get(), hidden_frames, 512, stage_positions);
 
         auto * external_grouped = ggml_reshape_2d(
@@ -222,11 +293,12 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
             weight(runtime, "decoder.external_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "decoder.external_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason));
         traces.emplace_back("external_cond_blocks." + std::to_string(stage_index * 2U), fused_linear);
-        fused = ggml_relu(context.get(), fused_linear);
+        fused = named_relu(context.get(), fused_linear);
         hidden = frames_to_channels_first(context.get(), fused, stage_positions, 512);
         hidden = residual_stack(context.get(), runtime, hidden, stage, reason, traces);
         hidden = ggml_interpolate(context.get(), hidden, hidden->ne[0] * 2, hidden->ne[1],
                                   hidden->ne[2], hidden->ne[3], GGML_SCALE_MODE_NEAREST);
+        ggml_set_name(hidden,("decoder.model."+std::to_string(stage)+".1").c_str());
         hidden = conv(context.get(), hidden,
             weight(runtime, "decoder.model." + std::to_string(stage) + ".2.weight", reason),
             weight(runtime, "decoder.model." + std::to_string(stage) + ".2.bias", reason), 1, 1);
@@ -236,14 +308,14 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
         weight(runtime, "decoder.model.4.weight", reason),
         weight(runtime, "decoder.model.4.bias", reason), 1, 1);
     traces.emplace_back("model.4", post_conv);
-    hidden = ggml_relu(context.get(), post_conv);
+    hidden = named_relu(context.get(), post_conv);
     hidden = conv(context.get(), hidden,
         weight(runtime, "decoder.model.6.weight", reason),
         weight(runtime, "decoder.model.6.bias", reason), 1, 1);
     traces.emplace_back("model.6", hidden);
     auto * output = channels_first_to_frames(context.get(), hidden, output_width, frames);
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
-    auto * graph = ggml_new_graph_custom(context.get(), 2048, false);
+    auto * graph = ggml_new_graph_custom(context.get(), decoder_graph_capacity(context.get()), false);
     ggml_build_forward_expand(graph, output);
     buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(context.get(), neural_backend(runtime)));
     if (!buffer) {
@@ -255,7 +327,7 @@ mb_status run_vq_decoder(const neural_runtime & runtime,
     ggml_backend_tensor_set(external_input, external_condition.data(), 0, ggml_nbytes(external_input));
     ggml_backend_tensor_set(target_input, target_condition.data(), 0, ggml_nbytes(target_input));
     ggml_backend_tensor_set(target_mask, mask.data(), 0, ggml_nbytes(target_mask));
-    const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
+    const auto status = neural_graph_compute(runtime, graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("decoder graph failed: ") + ggml_status_to_string(status);
         return MB_COMPUTE_FAILED;
@@ -289,10 +361,12 @@ mb_status run_vq_decoder_batch(
     reason = "this build has no GGML support";
     return MB_BACKEND_UNAVAILABLE;
 #else
-    constexpr std::uint32_t latent_width = 256;
+    decoder_layout layout{};
+    if (!get_decoder_layout(runtime, layout, reason)) return MB_INCOMPATIBLE_MODEL;
+    const auto latent_width = layout.latent;
     constexpr std::uint32_t external_width = 2;
-    constexpr std::uint32_t target_width = 304;
-    constexpr std::uint32_t output_width = 413;
+    const auto target_width = layout.target;
+    const auto output_width = layout.output;
     const auto frames = positions * 4U;
     if (batch_size == 0U || batch_size > 64U || positions < 1U || positions > 16U ||
         quantized.size() != static_cast<std::size_t>(batch_size) * positions * latent_width ||
@@ -315,7 +389,7 @@ mb_status run_vq_decoder_batch(
     for (auto * tensor : {latent_input, external_input, target_input, target_mask})
         ggml_set_input(tensor);
 
-    auto * hidden = ggml_relu(context.get(), conv_batch_independent(context.get(), latent_input,
+    auto * hidden = named_relu(context.get(), conv_batch_independent(context.get(), latent_input,
         weight(runtime, "decoder.model.0.weight", reason),
         weight(runtime, "decoder.model.0.bias", reason), 1, 1, batch_size));
     for (unsigned stage_index = 0; stage_index < 2U; ++stage_index) {
@@ -330,17 +404,14 @@ mb_status run_vq_decoder_batch(
             context.get(), hidden, 512, stage_positions, batch_size);
         hidden_frames = ggml_reshape_3d(context.get(), hidden_frames,
                                         512 / frame_group, stage_frames, batch_size);
-        hidden_frames = ggml_add(context.get(), hidden_frames,
-            ggml_mul(context.get(),
-                ggml_sub(context.get(), ggml_relu(context.get(), target_embedding), hidden_frames),
-                target_mask));
+        hidden_frames = precision_blend(context.get(),hidden_frames,named_relu(context.get(),target_embedding),target_mask);
         hidden_frames = ggml_reshape_3d(context.get(), hidden_frames,
                                         512, stage_positions, batch_size);
         auto * external_grouped = ggml_reshape_3d(
             context.get(), external_input, external_width * frame_group,
             stage_positions, batch_size);
         auto * fused = ggml_concat(context.get(), hidden_frames, external_grouped, 0);
-        fused = ggml_relu(context.get(), linear(context.get(), fused,
+        fused = named_relu(context.get(), linear(context.get(), fused,
             weight(runtime, "decoder.external_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "decoder.external_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason)));
         hidden = frames_to_channels_first_batch(
@@ -348,12 +419,13 @@ mb_status run_vq_decoder_batch(
         hidden = residual_stack_batch(context.get(), runtime, hidden, stage, batch_size, reason);
         hidden = ggml_interpolate(context.get(), hidden, hidden->ne[0] * 2, hidden->ne[1],
                                   hidden->ne[2], hidden->ne[3], GGML_SCALE_MODE_NEAREST);
+        ggml_set_name(hidden,("decoder.model."+std::to_string(stage)+".1").c_str());
         hidden = conv_batch_independent(context.get(), hidden,
             weight(runtime, "decoder.model." + std::to_string(stage) + ".2.weight", reason),
             weight(runtime, "decoder.model." + std::to_string(stage) + ".2.bias", reason),
             1, 1, batch_size);
     }
-    hidden = ggml_relu(context.get(), conv_batch_independent(context.get(), hidden,
+    hidden = named_relu(context.get(), conv_batch_independent(context.get(), hidden,
         weight(runtime, "decoder.model.4.weight", reason),
         weight(runtime, "decoder.model.4.bias", reason), 1, 1, batch_size));
     hidden = conv_batch_independent(context.get(), hidden,
@@ -362,7 +434,7 @@ mb_status run_vq_decoder_batch(
     auto * output_tensor = channels_first_to_frames_batch(
         context.get(), hidden, output_width, frames, batch_size);
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
-    auto * graph = ggml_new_graph_custom(context.get(), 4096U + batch_size * 512U, false);
+    auto * graph = ggml_new_graph_custom(context.get(), decoder_graph_capacity(context.get()), false);
     ggml_build_forward_expand(graph, output_tensor);
     buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(context.get(), neural_backend(runtime)));
     if (!buffer) { reason = "cannot allocate batched decoder compute buffer"; return MB_OUT_OF_MEMORY; }
@@ -371,7 +443,7 @@ mb_status run_vq_decoder_batch(
     ggml_backend_tensor_set(external_input, external_condition.data(), 0, ggml_nbytes(external_input));
     ggml_backend_tensor_set(target_input, target_condition.data(), 0, ggml_nbytes(target_input));
     ggml_backend_tensor_set(target_mask, mask.data(), 0, ggml_nbytes(target_mask));
-    const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
+    const auto status = neural_graph_compute(runtime, graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("batched decoder graph failed: ") + ggml_status_to_string(status);
         return MB_COMPUTE_FAILED;

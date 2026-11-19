@@ -1,3 +1,4 @@
+#include <motionbricks/inference.h>
 #include <motionbricks/motionbricks.h>
 
 #include <assert.h>
@@ -7,6 +8,7 @@
 
 int main(void) {
     char error[128] = {0};
+    assert(mb_model_set_arithmetic_calibration(0, "rsqrt", "exp2", error, sizeof(error)) == MB_INVALID_ARGUMENT);
     mb_runtime_options * options = 0;
     mb_command * command = 0;
 
@@ -59,7 +61,8 @@ int main(void) {
     assert(mb_command_get_seed(command, &seed, error, sizeof(error)) == MB_OK && seed == UINT64_C(42));
 
     mb_model * model = (mb_model *)(uintptr_t)1;
-    assert(mb_model_load("fixture", options, &model, error, sizeof(error)) == MB_IO_ERROR);
+    assert(mb_model_load("fixture", options, &model, error, sizeof(error)) ==
+        (MOTIONBRICKS_TEST_HAVE_GGML ? MB_IO_ERROR : MB_BACKEND_UNAVAILABLE));
     assert(model == 0 && error[0] != '\0');
     assert(mb_model_get_parameter_count(0, &seed, error, sizeof(error)) == MB_INVALID_ARGUMENT);
     assert(mb_model_get_neutral_joint_position(0, 0, &x, &y, &z, error, sizeof(error)) == MB_INVALID_ARGUMENT);

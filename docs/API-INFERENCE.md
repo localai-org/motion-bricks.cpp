@@ -3,6 +3,11 @@
 See [API selection](API.md). Public contract:
 [`motionbricks/inference.h`](../include/motionbricks/inference.h).
 
+The G1 layouts and behavior below remain unchanged. For SOMA, select
+`MB_MODEL_SOMA` at load time and use the same request/infer/motion handles with
+retargeting skeleton and transform setters; see [SOMA usage](API-SOMA.md). SOMA
+returns endpoint-corrected playback rather than the raw G1 boundary convention.
+
 `mb_model_infer` is a stateless wrapper of the existing composed inference path.
 It performs normalization, root/duration inference, pose-token inference and
 sampling, VQ decoding, and conversion to local joint rotations/root translations.

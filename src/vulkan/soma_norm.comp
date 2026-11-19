@@ -1,0 +1,98 @@
+#version 450
+
+#include "types.glsl"
+#include "generic_unary_head.glsl"
+
+#extension GL_EXT_control_flow_attributes : enable
+#define BLOCK_SIZE 512
+
+layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+shared vec2 sum[BLOCK_SIZE];
+
+
+// SOMA-only packed affine normalization: negative epsilon selects this protocol.
+// Ordinary positive-epsilon GGML normalization retains the upstream path.
+float soma_divide(float a, float b) {
+    precise float q = a / b;
+    precise float r = fma(-q, b, a);
+    return fma(r, 1.0 / b, q);
+}
+vec2 soma_combine(vec2 a, vec2 b, float count) {
+    precise float delta = b.x - a.x;
+    precise float mean = fma(0.5, a.x, 0.5 * b.x);
+    precise float variance = fma((delta * delta) * 0.25, 2.0 * count, a.y + b.y);
+    return vec2(mean, variance);
+}
+void soma_norm(uint row, uint tid, uint a_base, uint d_base) {
+    if (row >= p.ne01 - 2) return;
+    const uint threads = p.ne00 / 4;
+    precise float mean = 0.0;
+    precise float variance = 0.0;
+    if (tid < threads) {
+        for (uint j = 0; j < 4; ++j) {
+            precise float value = float(data_a[a_base + (4 * tid + j) * p.nb00]);
+            precise float delta = value - mean;
+            mean += soma_divide(delta, float(j + 1));
+            variance = fma(delta, value - mean, variance);
+        }
+    }
+    sum[tid] = vec2(mean, variance);
+    barrier();
+    float count = 4.0;
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        if (tid < threads && tid % 32 < stride)
+            sum[tid] = soma_combine(sum[tid], sum[tid + stride], count);
+        barrier();
+        count *= 2.0;
+    }
+    for (uint stride = threads / 64; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            sum[tid * 32] = soma_combine(sum[tid * 32], sum[(tid + stride) * 32], count);
+        barrier();
+        count *= 2.0;
+    }
+    precise float inverse = inversesqrt(sum[0].y / float(p.ne00) - p.param1);
+    const uint scale_base = get_aoffset() + src0_idx((p.ne01 - 2) * p.ne00);
+    const uint bias_base = get_aoffset() + src0_idx((p.ne01 - 1) * p.ne00);
+    for (uint i = tid; i < p.ne00; i += BLOCK_SIZE) {
+        precise float factor = float(data_a[scale_base + i * p.nb00]) * inverse;
+        precise float centered = float(data_a[a_base + i * p.nb00]) - sum[0].x;
+        data_d[d_base + i * p.nb10] = D_TYPE(fma(factor, centered, float(data_a[bias_base + i * p.nb00])));
+    }
+}
+
+void main() {
+    const uint row = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+
+    const uint a_base = get_aoffset() + src0_idx(row * p.ne00);
+    const uint d_base = get_doffset() + dst_idx(row * p.ne10);
+
+    if (p.param1 < 0.0) { soma_norm(row, tid, a_base, d_base); return; }
+
+    sum[tid] = vec2(0.0f, 0.0f);
+
+    [[unroll]] for (uint i0 = tid; i0 < p.ne00; i0 += BLOCK_SIZE) {
+        const float xi = float(data_a[a_base + i0*p.nb00]);
+        sum[tid].x += xi;
+        sum[tid].y += xi * xi;
+    }
+
+    // sum up partial sums and write back result
+    barrier();
+    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sum[tid] += sum[tid + s];
+        }
+        barrier();
+    }
+
+    const float mean = sum[0].x / p.ne00;
+    const float var = sum[0].y / p.ne00 - mean * mean;
+    const float inv_std = inversesqrt(var + p.param1);
+
+    [[unroll]] for (uint i0 = tid; i0 < p.ne00; i0 += BLOCK_SIZE) {
+        data_d[d_base + i0*p.nb10] = D_TYPE((float(data_a[a_base + i0*p.nb00]) - mean) * inv_std);
+    }
+}

@@ -1,0 +1,54 @@
+--- a/src/ggml-vulkan/vulkan-shaders/soft_max.comp
++++ b/src/ggml-vulkan/vulkan-shaders/soft_max.comp
+@@ -38,6 +38,27 @@
+ // num_iters is the number of BLOCK_SIZE loop iterations we need to iterate
+ // over all the columns. The main function tries to pass a constant here,
+ // as if it were a template function, to allow unrolling.
++// Diagnostic CUDA range reduction, without a calibration table.
++float soma_exp(float x) {
++    if (isinf(x) && x < 0.0) return 0.0;
++    precise float sat = clamp(fma(x, 0.005724980030208826, 0.5), 0.0, 1.0);
++    precise float product = sat * 252.0;
++    int integral = int(floor(product));
++    // Recover floor of the exact product if RN crossed an integer boundary.
++    if (product == float(integral) && fma(sat, 252.0, -product) < 0.0) --integral;
++    int n = integral - 126;
++    precise float reduced = fma(x, 1.4426950216293334961, -float(n));
++    reduced = fma(x, 1.925963033500011079e-08, reduced);
++    precise float result = exp2(reduced);
++    return ldexp(result, n);
++}
++
++float soma_divide(float numerator, float denominator) {
++    precise float quotient = numerator / denominator;
++    precise float residual = fma(-quotient, denominator, numerator);
++    return fma(residual, 1.0 / denominator, quotient);
++}
++
+ void soft_max(uint num_iters) {
+     const uint tid = gl_LocalInvocationID.x;
+     const uint rowx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+@@ -127,9 +148,9 @@
+         const uint i = rowx * p.KX + col;
+         FLOAT_TYPE val;
+         if (idx < DATA_CACHE_SIZE) {
+-            val = exp(data_cache[idx] - max_val);
++            val = soma_exp(data_cache[idx] - max_val);
+         } else {
+-            val = exp(FLOAT_TYPE(data_a[i]) * p.scale + (p.KY > 0 ? slope * FLOAT_TYPE(data_b[rowy_start + col]) : FLOAT_TYPE(0.0f)) - max_val);
++            val = soma_exp(FLOAT_TYPE(data_a[i]) * p.scale + (p.KY > 0 ? slope * FLOAT_TYPE(data_b[rowy_start + col]) : FLOAT_TYPE(0.0f)) - max_val);
+         }
+         sum += val;
+         if (idx < DATA_CACHE_SIZE) {
+@@ -164,9 +185,9 @@
+         }
+ 
+         if (idx < DATA_CACHE_SIZE) {
+-            data_d[rowx*p.KX + col] = D_TYPE(data_cache[idx] * rcpdivisor);
++            data_d[rowx*p.KX + col] = D_TYPE(soma_divide(data_cache[idx], sum));
+         } else {
+-            data_d[rowx*p.KX + col] *= D_TYPE(rcpdivisor);
++            data_d[rowx*p.KX + col] = D_TYPE(soma_divide(data_d[rowx*p.KX + col], sum));
+         }
+     }
+ }

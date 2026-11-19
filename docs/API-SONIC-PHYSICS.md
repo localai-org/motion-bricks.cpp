@@ -183,7 +183,7 @@ substituting a robot, materials or controller does not inherit tracking parity.
 ## Level 2: SONIC + MuJoCo controller
 
 Header: [`motionbricks/physics.h`](../include/motionbricks/physics.h).
-Optional native MuJoCo 3.12.0 dependency, enabled at build time. A build against
+Optional native MuJoCo 4.0.1 dependency, enabled at build time. A build against
 3.3.5 is retained for reference comparisons; see [SDK setup](MUJOCO-UPGRADE.md).
 `mb_physics_engine_version(buffer, capacity, error, error_capacity)` copies the
 loaded engine's NUL-terminated version into a caller-owned buffer (32 bytes is

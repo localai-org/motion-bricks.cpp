@@ -174,7 +174,9 @@ def tensor_kind(component: str, name: str, value: np.ndarray, pose_bf16: bool = 
 def write_component(path: Path, component: str, values: list[tuple[str, np.ndarray]],
                     source_hash: str, *, general_name: str = "NVIDIA MotionBricks G1",
                     extra_metadata: list[bytes] | None = None,
-                    pose_bf16: bool = False) -> dict[str, object]:
+                    pose_bf16: bool = False,
+                    skeleton: str = "g1skel34", upstream_revision: str = UPSTREAM_REVISION,
+                    joint_names: tuple[str, ...] = JOINT_NAMES) -> dict[str, object]:
     tensors: list[Tensor] = []
     names: set[str] = set()
     offset = 0
@@ -202,15 +204,15 @@ def write_component(path: Path, component: str, values: list[tuple[str, np.ndarr
                else GGML_FTYPE_ALL_F32),
         kv_u32("motionbricks.format_version", 1),
         kv_string("motionbricks.component", component),
-        kv_string("motionbricks.skeleton", "g1skel34"),
-        kv_string("motionbricks.upstream_revision", UPSTREAM_REVISION),
+        kv_string("motionbricks.skeleton", skeleton),
+        kv_string("motionbricks.upstream_revision", upstream_revision),
         kv_string("motionbricks.source_sha256", source_hash),
         kv_u64("motionbricks.parameter_count", parameter_count),
     ]
     if extra_metadata:
         metadata.extend(extra_metadata)
     if component == "support":
-        metadata.append(kv_string("motionbricks.joint_names", ",".join(JOINT_NAMES)))
+        metadata.append(kv_string("motionbricks.joint_names", ",".join(joint_names)))
 
     header = bytearray(GGUF_MAGIC)
     header += struct.pack("<IQQ", GGUF_VERSION, len(tensors), len(metadata))

@@ -21,6 +21,7 @@ import (
 )
 
 type streamCommand struct {
+	Fast    bool       `json:"fast,omitempty"`
 	Type    string     `json:"type"`
 	Seq     uint64     `json:"seq"`
 	Style   string     `json:"style,omitempty"`
@@ -30,6 +31,7 @@ type streamCommand struct {
 	Enabled bool       `json:"enabled,omitempty"`
 }
 type streamFrame struct {
+	LocalPositions      []float32     `json:"local_positions,omitempty"`
 	Type                string        `json:"type"`
 	Epoch               uint64        `json:"epoch"`
 	Tick                uint64        `json:"tick"`
@@ -103,6 +105,7 @@ type streamJoin struct {
 	resume string
 }
 type streamPlan struct {
+	stepper              streamStepper
 	epoch, revision, seq uint64
 	at                   int
 	command              planRequest
@@ -117,7 +120,7 @@ type streamResult struct {
 	ms     float64
 }
 type streamHub struct {
-	s       *demoServer
+	backend streamPlanner
 	physics *mb.Physics
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -130,9 +133,9 @@ type streamHub struct {
 	workers sync.WaitGroup
 }
 
-func newStreamHub(s *demoServer, p *mb.Physics) *streamHub {
+func newStreamHub(backend streamPlanner, p *mb.Physics) *streamHub {
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &streamHub{s: s, physics: p, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 16), input: make(chan streamInput, 64), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
+	h := &streamHub{backend: backend, physics: p, ctx: ctx, cancel: cancel, done: make(chan struct{}), join: make(chan streamJoin, 8), leave: make(chan *streamPeer, 16), input: make(chan streamInput, 64), jobs: make(chan streamPlan, 1), results: make(chan streamResult, 1)}
 	h.workers.Add(1)
 	go h.planner()
 	go h.run()
@@ -295,30 +298,20 @@ func (h *streamHub) planner() {
 		case job := <-h.jobs:
 			start := time.Now()
 			result := streamResult{job: job}
-			if job.clip != nil {
+			if job.stepper != nil {
+				result.motion, result.err = job.stepper.step(job.command)
+			} else if job.clip != nil {
 				root, rot := sampleStreamMotion(job.context, 0)
 				result.motion, result.err = alignKimodoClip(job.clip, [3]float32{root[0], root[1], root[2]}, rot)
 			} else {
-				style, err := h.s.style(job.command.Style)
-				result.err = err
-				if err == nil {
-					agent, e := h.s.model.NewAgent()
-					result.err = e
-					if e == nil {
-						if job.context == nil {
-							result.err = agent.Reset(style)
-						} else {
-							result.err = agent.SetContext(job.context.Roots, job.context.Rotations, job.context.Frames)
-						}
-						if result.err == nil {
-							result.motion, result.err = h.s.commandPlan(&session{agent: agent}, style, job.command)
-						}
-						agent.Close()
-					}
-				}
+				result.motion, result.err = h.backend.plan(job.context, job.command)
 			}
 			if result.err == nil {
-				result.err = validateStreamMotion(result.motion)
+				if job.stepper != nil {
+					result.err = validateStreamPoseSequence(result.motion, 1)
+				} else {
+					result.err = validateStreamMotion(result.motion)
+				}
 			}
 			result.ms = float64(time.Since(start)) / 1e6
 			select {
@@ -340,11 +333,23 @@ func (h *streamHub) run() {
 	tick := uint64(0)
 	slow := uint64(0)
 	var timeline referenceTimeline
+	var stepper streamStepper
+	newStepper := func() streamStepper {
+		if factory, ok := h.backend.(streamStepperFactory); ok {
+			return factory.newStepper()
+		}
+		return nil
+	}
+	stepper = newStepper()
 	var last *streamFrame
 	var targets *mb.Keyframes
 	control := planRequest{Style: "walk", Facing: [2]float32{0, 1}, Seed: 1}
-	if h.s.styles[control.Style] == nil {
-		control.Style = h.s.ordered[0].Name
+	styles := map[string]bool{}
+	for _, style := range h.backend.styles() {
+		styles[style.Name] = true
+	}
+	if !styles[control.Style] {
+		control.Style = h.backend.styles()[0].Name
 	}
 	paused := false
 	physicsOn := false
@@ -474,10 +479,11 @@ func (h *streamHub) run() {
 			lastSeq = c.Seq
 			switch c.Type {
 			case "control":
-				if !finite(c.Move[0], c.Move[1], c.Facing[0], c.Facing[1]) || math.Hypot(float64(c.Move[0]), float64(c.Move[1])) > 1.01 || math.Hypot(float64(c.Facing[0]), float64(c.Facing[1])) < .1 || math.Hypot(float64(c.Facing[0]), float64(c.Facing[1])) > 1.01 || h.s.styles[c.Style] == nil {
+				if !finite(c.Move[0], c.Move[1], c.Facing[0], c.Facing[1]) || math.Hypot(float64(c.Move[0]), float64(c.Move[1])) > 1.01 || math.Hypot(float64(c.Facing[0]), float64(c.Facing[1])) < .1 || math.Hypot(float64(c.Facing[0]), float64(c.Facing[1])) > 1.01 || !styles[c.Style] {
 					ack("rejected", "invalid control vector/style")
 					continue
 				}
+				control.Fast = c.Fast
 				control.Move = c.Move
 				control.Facing = c.Facing
 				control.Style = c.Style
@@ -486,14 +492,16 @@ func (h *streamHub) run() {
 				pendingSeq = c.Seq
 				ack("received", "")
 			case "jump", "play_clip":
+				if !h.backend.actions() {
+					ack("rejected", "action unavailable for selected model")
+					continue
+				}
 				if lockedUntil >= int(tick)*3/5 || pendingClip != nil || wantKind == "jump" {
 					ack("rejected", "action already active")
 					continue
 				}
 				if c.Type == "play_clip" {
-					h.s.mu.Lock()
-					clip := h.s.kimodo[c.Clip]
-					h.s.mu.Unlock()
+					clip := h.backend.clip(c.Clip)
 					if clip == nil {
 						ack("rejected", "unknown clip")
 						continue
@@ -541,6 +549,7 @@ func (h *streamHub) run() {
 				revision++
 				tick = 0
 				timeline = referenceTimeline{}
+				stepper = newStepper()
 				holdAtEnd = false
 				last = nil
 				targets = nil
@@ -570,6 +579,38 @@ func (h *streamHub) run() {
 			job := result.job
 			if job.seq != 0 {
 				log.Printf("stream plan: seq=%d revision=%d/%d at=%d now=%.1f style=%s move=%v ms=%.1f err=%v", job.seq, job.revision, revision, job.at, float64(tick)*.6, job.command.Style, job.command.Move, result.ms, result.err)
+			}
+			if job.stepper != nil {
+				if job.epoch != epoch {
+					continue
+				}
+				if result.err != nil {
+					fail(fmt.Errorf("controller: %w", result.err))
+					continue
+				}
+				tick++
+				motion := result.motion
+				if motion.Targets != nil {
+					targets = motion.Targets
+					sendAll(planEvent())
+				}
+				last = &streamFrame{Type: "frame", Epoch: epoch, Tick: tick, Time: float64(tick) / 50, Root: motion.Roots, Rotations: motion.Rotations, LocalPositions: motion.LocalPositions, Revision: job.revision, Style: job.command.Style, Kind: "motion", Paused: paused, SlowTicks: slow}
+				data, _ := json.Marshal(last)
+				for p := range peers {
+					p.pose(data)
+				}
+				if job.seq != 0 {
+					sendAll(map[string]any{"type": "ack", "seq": job.seq, "state": "applied", "time": float64(tick) / 50, "epoch": epoch})
+					if pendingSeq == job.seq {
+						pendingSeq = 0
+					}
+				}
+				deadline = deadline.Add(20 * time.Millisecond)
+				if time.Since(deadline) > 200*time.Millisecond {
+					slow++
+					deadline = time.Now()
+				}
+				continue
 			}
 			if job.epoch != epoch || job.revision != revision {
 				dirty = true
@@ -626,6 +667,29 @@ func (h *streamHub) run() {
 			if owner == nil {
 				continue
 			}
+			if stepper != nil {
+				if paused {
+					deadline = time.Now()
+					if last != nil && time.Since(lastPausedSend) > 100*time.Millisecond {
+						lastPausedSend = time.Now()
+						last.Paused = true
+						data, _ := json.Marshal(last)
+						for p := range peers {
+							p.pose(data)
+						}
+					}
+					continue
+				}
+				if !busy && !time.Now().Before(deadline) {
+					job := streamPlan{epoch: epoch, revision: revision, seq: pendingSeq, command: control, stepper: stepper}
+					select {
+					case h.jobs <- job:
+						busy = true
+					default:
+					}
+				}
+				continue
+			}
 			frame := float64(tick) * .6
 			if lockedUntil >= 0 && frame >= float64(lockedUntil) {
 				kind = "motion"
@@ -652,7 +716,7 @@ func (h *streamHub) run() {
 				if job.kind == "motion" && job.command.Move == [2]float32{} {
 					zero := float32(0)
 					job.command.Speed = &zero
-					if h.s.styles["idle"] != nil {
+					if styles["idle"] {
 						job.command.Style = "idle"
 					}
 				}
@@ -662,7 +726,7 @@ func (h *streamHub) run() {
 				control.Seed++
 				job.command.Seed = control.Seed
 				if timeline.motion != nil {
-					job.context = timeline.context(at)
+					job.context = timeline.context(at + h.backend.contextOffset())
 				}
 				if job.kind == "jump" {
 					speed := float32(5)
@@ -750,6 +814,7 @@ func (h *streamHub) run() {
 				}
 				root, rot := timeline.sample(float64(tick) * .6)
 				last = &streamFrame{Type: "frame", Epoch: epoch, Tick: tick, Time: float64(tick) / 50, Root: root, Rotations: rot, Physics: physicsOn, Revision: revision, Style: control.Style, Kind: kind, SlowTicks: slow}
+				last.LocalPositions = sampleLocalPositions(timeline.motion, float64(tick)*.6-float64(timeline.base))
 				last.Holding = holdAtEnd && float64(tick)*.6 >= float64(timeline.end())
 				if kind != "motion" {
 					last.Progress = math.Max(0, math.Min(1, (float64(tick)*.6-float64(clipStart))/float64(max(1, clipEnd-clipStart))))

@@ -1,0 +1,18 @@
+{
+  "source_revision": "54fc563aeaaf819a753d72cc9fdc6713989cdd43",
+  "source": "app/runtime/soma/presets.py",
+  "notes": "Speed is the mode default, or the Walk/Jog/Run blend-space target speed. Horizon is position_scale in seconds; velocity_scale applies to both distance and root velocity.",
+  "styles": {
+    "idle": {"speed": 0, "velocity_scale": 1, "target_horizon": 1},
+    "walk": {"speed": 2.3, "velocity_scale": 0.97, "target_horizon": 1},
+    "jog": {"speed": 3, "velocity_scale": 0.97, "target_horizon": 1},
+    "run": {"speed": 4.5, "velocity_scale": 0.97, "target_horizon": 1},
+    "crouch": {"speed": 1.5, "velocity_scale": 0.9, "target_horizon": 0.8},
+    "skipping": {"speed": 1.45, "velocity_scale": 1, "target_horizon": 1.32},
+    "vogue": {"speed": 1.3, "velocity_scale": 1, "target_horizon": 1.3},
+    "injured_torso": {"speed": 0.8, "velocity_scale": 1, "target_horizon": 1.2},
+    "injured_leg": {"speed": 0.8, "velocity_scale": 1, "target_horizon": 1.2},
+    "walk_zombie": {"speed": 0.85, "velocity_scale": 1, "target_horizon": 1.3},
+    "combat": {"speed": 1, "velocity_scale": 1, "target_horizon": 1.7}
+  }
+}

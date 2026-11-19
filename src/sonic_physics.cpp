@@ -14,8 +14,8 @@
 #include <vector>
 #if defined(MOTIONBRICKS_HAVE_MUJOCO)
 #include <mujoco/mujoco.h>
-static_assert(mjVERSION_HEADER == 335 || mjVERSION_HEADER == 3012000,
-              "Validated MuJoCo SDKs: 3.3.5 reference or 3.12.0 runtime");
+static_assert(mjVERSION_HEADER == 335 || mjVERSION_HEADER == 3012000 || mjVERSION_HEADER == 4000001,
+              "Validated MuJoCo SDKs: 3.3.5 reference, 3.12.0 or 4.0.1 runtime");
 #endif
 using motionbricks::detail::guard;
 using motionbricks::detail::fail;
@@ -216,7 +216,7 @@ mb_status mb_physics_create(mb_sonic * sonic,const char * scene,const char * con
         if(!s->model) return fail(MB_INVALID_FORMAT,error,cap,message);
         auto * m=s->model.get();
         if(m->nq!=50 || m->nv!=49 || m->nu!=43) return fail(MB_INVALID_FORMAT,error,cap,"requires original 43-control G1");
-#if mjVERSION_HEADER == 3012000
+#if mjVERSION_HEADER >= 3012000
         if(m->nactuator!=43) return fail(MB_INVALID_FORMAT,error,cap,"requires original 43-actuator G1");
         // Keep active motor trees awake. Sleeping still avoids static geometry
         // work; it must be enabled before mjData initialization. Never suspend
@@ -235,13 +235,13 @@ mb_status mb_physics_create(mb_sonic * sonic,const char * scene,const char * con
             auto & j=s->joints[k];int id=mj_name2id(m,mjOBJ_JOINT,names[k]);
             if(id<0 || m->jnt_type[id]!=mjJNT_HINGE) return fail(MB_INVALID_FORMAT,error,cap,"missing G1 hinge");
             j.q=m->jnt_qposadr[id];j.v=m->jnt_dofadr[id];j.body=m->jnt_bodyid[id];j.actuator=-1;
-#if mjVERSION_HEADER == 3012000
+#if mjVERSION_HEADER >= 3012000
             for(int a=0;a<m->nactuator;++a) if(m->actuator_trntype[a]==mjTRN_JOINT && m->actuator_trnid[a*2]==id) j.actuator=a;
 #else
             for(int a=0;a<m->nu;++a) if(m->actuator_trntype[a]==mjTRN_JOINT && m->actuator_trnid[a*2]==id) j.actuator=a;
 #endif
             if(j.actuator<0) return fail(MB_INVALID_FORMAT,error,cap,"missing G1 actuator");
-#if mjVERSION_HEADER == 3012000
+#if mjVERSION_HEADER >= 3012000
             if(m->actuator_ctrlnum[j.actuator]!=1) return fail(MB_INVALID_FORMAT,error,cap,"G1 motor must have one scalar control");
             j.control=m->actuator_ctrladr[j.actuator];
             if(j.control<0 || j.control>=m->nu) return fail(MB_INVALID_FORMAT,error,cap,"invalid G1 motor control address");

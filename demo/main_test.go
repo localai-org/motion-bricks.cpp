@@ -200,8 +200,12 @@ func TestComparisonHTTPFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK || meta["runtime"] != "comparison" || meta["plans"] != float64(14) ||
-		meta["joints"] != float64(34) || meta["passed"] != true {
+	wantPlans, wantJoints, wantPassed := float64(14), float64(34), true
+	if comparison.meta["format"] == "motionbricks-soma-chain-view-v1" {
+		wantPlans, wantJoints, wantPassed = 2, 77, false
+	}
+	if response.StatusCode != http.StatusOK || meta["runtime"] != "comparison" || meta["plans"] != wantPlans ||
+		meta["joints"] != wantJoints || meta["passed"] != wantPassed {
 		t.Fatalf("invalid comparison metadata: status=%d meta=%v", response.StatusCode, meta)
 	}
 	response, err = http.Get(server.URL + "/api/comparison")
@@ -531,6 +535,14 @@ func TestHeadlessComparison(t *testing.T) {
 	}
 	want := map[string]string{"runtime": "comparison", "passed": "true", "plans": "14", "joints": "34", "vectors": "34",
 		"showcase": "Forward walk,Right turn,Zombie walk", "showcaseFrames": "176"}
+	if comparison.meta["format"] == "motionbricks-soma-chain-view-v1" {
+		var document comparisonDocument
+		if err := json.Unmarshal(comparison.data, &document); err != nil {
+			t.Fatal(err)
+		}
+		want = map[string]string{"runtime": "comparison", "passed": "false", "plans": "2", "joints": fmt.Sprint(document.Joints),
+			"vectors": fmt.Sprint(document.Joints), "showcase": "SOMA chain", "showcaseFrames": fmt.Sprint(document.Plans[0].ActualFrames)}
+	}
 	for key, expected := range want {
 		if values[key] != expected {
 			t.Fatalf("comparison %s=%q, want %q", key, values[key], expected)

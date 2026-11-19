@@ -1,0 +1,12 @@
+{
+  "format": "motionbricks-controller-tolerances-v1",
+  "oracle_playback": {"position_m": 0.0001, "rotation_deg": 0.01, "speed_mps": 0.0001},
+  "native_feedback": {"position_m": 0.001, "rotation_deg": 0.05, "speed_mps": 0.001},
+  "inference_replay": {"position_m": 0.0001, "rotation_deg": 0.01, "contacts_absolute": 0.001},
+  "generation_ticks_exact": true,
+  "allowed_durations_exact": true,
+  "selected_durations_exact": true,
+  "contact_classification_exact": true,
+  "scope": "55-second, 50 Hz interactive sequence: all nine upstream SOMA locomotion modes, mode and stance transitions, turns, reversals, maximum speed, partial input, stop/restart. First upstream idle clip per stance; FP32 PyTorch oracle.",
+  "rationale": "Controller decisions must match exactly. Isolated controller and inference pose limits retain the previous 0.1 mm / 0.01 degree ceilings. Native feedback allows 1 mm / 0.05 degree over the full 55 seconds because rounding affects velocity estimation and subsequent inputs. Contact probabilities allow 0.001 absolute (0.1 percentage point), with no changes to the 0.5 contact classification. These new interactive-sequence limits do not alter existing fixed-chain regression limits. Measured maxima are included separately in reports."
+}

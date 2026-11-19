@@ -4,12 +4,24 @@ The native demo uses WebSocket commands and timestamped poses. The browser
 renders an interpolated stream; it does not schedule inference, advance the
 agent or step physics. Uploads, metadata and recorded playback remain HTTP.
 
+G1 and SOMA share the stream hub, bounded worker, ownership, commands and browser
+buffer. G1's future-boundary planner and SOMA's upstream continuous locomotion
+policy plug into that hub. SOMA controller assets enable springs, blend spaces,
+mode-specific durations, recorded playback context and idle clip transitions.
+The optional `fast` control field requests the mode's maximum speed (Shift).
+
+`/api/meta`, `/api/stream` and `/api/stream/socket` accept `?model=soma`;
+requests without a model still select G1. The socket commands and protocol
+version stay unchanged. Each model owns an independent stream, with its own
+ownership/resume token. SOMA does not support G1 physics, jumps or Kimodo clips.
+The former `/api/soma/session` and `/api/soma/plan` path is removed.
+
 An optional [collision geometry overlay](COLLISION-GEOMETRY.md) sends compiled
 shape definitions at connection setup and actual geom transforms with poses.
 
 ## Scheduling and playback
 
-One server event loop owns the reference timeline and physical state. A separate
+One server event loop owns the clock and physical state. For G1, a separate
 bounded worker plans from a four-frame snapshot at a future reference boundary.
 Stale revisions and late plans are discarded. Planning runs ahead of playback;
 normal replanning cannot replace the past.
@@ -26,16 +38,30 @@ recompiling it. At most four catch-up ticks run per loop; severe computation lag
 slows simulation and increments `slow_ticks`, never increases the physics
 timestep or skips physical steps.
 
-Reference replacement uses an eight-frame eased crossfade, starting exactly
+G1 reference replacement uses an eight-frame eased crossfade, starting exactly
 at the old reference pose. This is an explicit **deployment smoothing policy**,
 not an upstream inference/parity claim. Kimodo clips play in full, with the exit
 planned from their final pose and previous movement intent retained.
 
-No directional input requests the idle pose style (when available) and explicit
+For G1, no directional input requests the idle pose style (when available) and explicit
 zero target speed. The completed stop plan's last pose is then held until input
 changes; the 50 Hz clock and optional physical simulation continue. This demo
 policy avoids repeatedly feeding the native planner's small forward fallback
 back into idle. The native planner and upstream parity semantics are unchanged.
+
+SOMA with `controller-assets.json` advances the upstream policy at 50 Hz on the
+same worker. It generates before sampling when the active mode changes, speed or
+direction crosses upstream's threshold, or playback reaches the mode's transition
+point. Context is sampled at 30 Hz from actual displayed pose history. There is no
+additional eight-frame crossfade. Stops generate into the authored idle clip;
+stance changes select the standing or crouching clip. Inference holds the logical
+clock until the step completes, so latency cannot skip history or transitions.
+A reset creates a fresh controller; any in-flight old epoch result is discarded.
+Control revisions arriving during a step are applied on the following step.
+
+The legacy SOMA style-asset format remains readable for older deployments, but
+uses the former approximate future-boundary policy and has no interactive parity
+claim. Deploy the controller assets for the behavior validated below.
 
 The browser buffers about 150 ms, interpolates roots/physical joints and SLERPs
 local quaternions. Its render clock preserves fractional elapsed time, with at
@@ -62,18 +88,23 @@ Client messages use increasing positive safe-integer `seq` values:
 
 | Type | Additional fields |
 |---|---|
-| `control` | `style`, `move: [x,z]`, `facing: [x,z]` |
+| `control` | `style`, `move: [x,z]`, `facing: [x,z]`, optional `fast` boolean |
 | `jump` | none |
 | `play_clip` | `clip` asset ID |
 | `physics` | `enabled` boolean |
 | `pause`, `resume`, `reset`, `ping` | none |
 
 Acknowledgements report `received`, `scheduled`, `applied`, `superseded`,
-`duplicate` or `rejected`. Continuous intent is coalesced into future plans.
+`duplicate` or `rejected`. Continuous intent is coalesced into future plans or the next continuous controller step.
 Discrete clips/jumps are not replayed on reconnect. `targets` events publish
 planned target keyframes. `frame` messages contain epoch, tick, simulation time,
-reference root and 34 XYZW rotations; physics adds 30 world XYZ joints, parents
-and contacts. Frames also report pause/error, action progress, control revision
+reference root and XYZW rotations for the selected skeleton (34 G1 or 77 SOMA).
+SOMA also sends optional `local_positions`, three local XYZ values per joint.
+These translations vary during endpoint correction and cannot be reconstructed
+from a fixed rest skeleton. The same optional field is used in target keyframes
+and the Go motion structure; G1 omits it, preserving existing G1 payloads.
+Client validation uses the metadata joint count and rejects layout changes
+within an epoch. Physics adds 30 world XYZ joints, parents and contacts. Frames also report pause/error, action progress, control revision
 and slow ticks. Reset alone starts a new epoch.
 
 Production rejects old mutating HTTP batch endpoints with 410. They remain in
@@ -150,3 +181,31 @@ without pause, reset or invalid output.
 The warning-only fall run advanced native physics another 4.64 seconds after
 the detected fall, with no pause, reset or invalid values (largest rendered
 physical joint step 14.6 cm).
+
+### Independent SOMA controller capture
+
+`reference/capture_soma_controller.py` runs the pinned upstream character,
+movement springs, state machine, blend spaces, history and playback, replacing
+only TensorRT inference transport with the official FP32 PyTorch model. It
+records 55 seconds / 2,750 frames / 80 generations, including all nine modes,
+turns, reversal, crouching, maximum speed, partial input, and stop/restart. The
+first upstream idle clip per stance is selected to make playback reproducible.
+
+`TestUpstreamController` first injects recorded inference outputs to isolate
+controller parity, then optionally uses native inference in a complete feedback
+loop. Both require exact generation ticks, allowed durations, selected durations
+and transition offsets. The isolated controller's maximum target error is
+0.00024 mm, playback error 0.0020 mm, and speed error zero. Native feedback over
+55 seconds reaches 0.245 mm / 0.013 degrees, with all 80 decisions matching.
+
+Acceptance is defined in `reference/soma-controller-tolerances.json`. The longer
+native feedback sequence has a separate 1 mm / 0.05 degree limit; existing short
+chain regression limits remain unchanged. Per-generation native inference has
+maximum pose error 0.00575 mm / 0.00351 degrees. Maximum contact probability error
+is 0.000490 with identical classifications at 0.5. Two events exceed the legacy
+short-chain contact ceiling; the interactive ceiling is 0.001. Reports retain
+these measurements and the legacy-contact verdict rather than hiding them.
+
+This capture qualifies FP32 locomotion with one idle clip per stance. It does not
+qualify interactions, randomized alternate idle clips, or interactive FP16.
+Existing FP16 fixed-chain results are a separate qualification.

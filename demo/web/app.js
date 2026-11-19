@@ -32,6 +32,7 @@ const kimodoPhase = document.querySelector('#kimodo-phase');
 const kimodoProgressBar = document.querySelector('#kimodo-progress-bar');
 const kimodoProgressLabel = document.querySelector('#kimodo-progress-label');
 const query = new URLSearchParams(location.search);
+const somaSelected = query.get('model') === 'soma';
 
 const state = {
   meta: null, session: '', motion: null, targets: null, playhead: 0,
@@ -170,8 +171,9 @@ class SkeletonRig {
     if (this.label) scene.add(this.label);
   }
 
-  pose(roots, rotations, frame, frameCount) {
+  pose(roots, rotations, frame, frameCount, localPositions = null) {
     const index = Math.min(frameCount - 1, Math.max(0, frame));
+    if (localPositions) for (let j=1;j<this.bones.length;j++) this.bones[j].position.fromArray(localPositions,(index*this.bones.length+j)*3);
     this.bones[0].position.fromArray(roots, index * 3);
     for (let joint = 0; joint < this.bones.length; joint++) {
       this.bones[joint].quaternion.fromArray(rotations, (index * this.bones.length + joint) * 4);
@@ -179,19 +181,21 @@ class SkeletonRig {
     this.updateGeometry();
   }
 
-  poseInterpolated(roots, rotations, frame, frameCount) {
+  poseInterpolated(roots, rotations, frame, frameCount, localPositions = null) {
     const at=THREE.MathUtils.clamp(frame,0,frameCount-1), first=Math.floor(at),next=Math.min(first+1,frameCount-1),u=at-first;
     this.bones[0].position.fromArray(roots,first*3).lerp(new THREE.Vector3().fromArray(roots,next*3),u);
+    if(localPositions) for(let j=1;j<this.bones.length;j++) this.bones[j].position.fromArray(localPositions,(first*this.bones.length+j)*3).lerp(endPoint.fromArray(localPositions,(next*this.bones.length+j)*3),u);
     const q=new THREE.Quaternion();
     for(let j=0;j<this.bones.length;j++)this.bones[j].quaternion.fromArray(rotations,(first*this.bones.length+j)*4)
       .slerp(q.fromArray(rotations,(next*this.bones.length+j)*4),u);
     this.updateGeometry();
   }
 
-  poseWorld(positions, offset = 0) {
+  poseWorld(positions, offset = 0, nextOffset = offset, alpha = 0) {
     for (let joint = 0; joint < this.jointMeshes.length; joint++) {
       const marker = this.jointMeshes[joint];
       marker.position.fromArray(positions, offset + joint * 3);
+      if (alpha > 0) marker.position.lerp(endPoint.fromArray(positions, nextOffset + joint * 3), alpha);
       marker.scale.setScalar(joint === 0 ? this.rootRadius : this.jointRadius);
     }
     for (const segment of this.segments) {
@@ -386,7 +390,13 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
+function modelURL(path) {
+  const url = new URL(path, location.href);
+  if (somaSelected) url.searchParams.set('model','soma');
+  return url;
+}
 async function api(path, body) {
+  path = modelURL(path);
   const response = await fetch(path, {
     method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json'},
     body: body ? JSON.stringify(body) : undefined,
@@ -454,12 +464,13 @@ function installStyles(styles) {
   for (const style of styles) {
     const option = document.createElement('option');
     option.value = style.name;
-    option.textContent = `${style.name.replaceAll('_', ' ')} · ${style.speed.toFixed(1)} m/s`;
+    const labels = {linear_1d:'Forward · walk / jog / run',directional_2d:'Strafing',crouch_directional_2d:'Crouching'};
+    option.textContent = `${labels[style.name] ?? style.name.replace(/_1d$/, '').replaceAll('_', ' ')} · ${style.speed.toFixed(1)} m/s`;
     styleSelect.append(option);
   }
   state.style = styles.some(item => item.name === 'walk') ? 'walk' : styles[0].name;
   styleSelect.value = state.style;
-  styleSelect.addEventListener('change', () => { state.style = styleSelect.value; void requestPlan(); });
+  styleSelect.addEventListener('change', () => { state.style = styleSelect.value; updateControl(); void requestPlan(); });
 }
 
 function installKimodo(clips) {
@@ -549,13 +560,13 @@ function useMotion(response, plannedMove = state.move, playhead = 0, plannedAdva
   setGroundPath(state.generatedPath, response.motion.roots, response.motion.frames);
   setGroundPath(state.targetPath, response.targets.roots, response.targets.frames);
   for (let frame = 0; frame < response.targets.frames; frame++) {
-    state.targetRigs[frame].pose(response.targets.roots, response.targets.rotations, frame, response.targets.frames);
+    state.targetRigs[frame].pose(response.targets.roots, response.targets.rotations, frame, response.targets.frames, response.targets.local_positions);
   }
   updateTargetVisibility();
 }
 
 async function requestPlan(advance = Math.floor(state.playhead), override = null) {
-  if(state.stream){state.stream.client.send('control',{style:state.style,move:[...state.move],facing:[...state.facing]});return null;}
+  if(state.stream){state.stream.client.send('control',{style:state.style,move:[...state.move],facing:[...state.facing],fast:state.keys.has('shift')});return null;}
   if (!state.session || state.controlsLocked || state.kimodo) return null;
   if (state.live?.enabled && (state.live.busy || state.live.queue.length)) {
     state.live.deferredPlan = {advance: null, override};
@@ -592,6 +603,7 @@ async function requestPlan(advance = Math.floor(state.playhead), override = null
 }
 
 async function beginJump() {
+  if (somaSelected) return;
   if(state.stream){state.stream.client.send('jump');return;}
   if (!state.motion || state.pending || state.controlsLocked || state.jumpActive) return;
   const source = Math.hypot(state.move[0], state.move[1]) > 1e-6 ? state.move : state.facing;
@@ -624,7 +636,8 @@ function updateControl() {
   const length = Math.hypot(right, forward);
   if (length > 0) { right /= length; forward /= length; }
   const [x, z] = cameraRelativeMovement(right, forward);
-  if (length > 0) state.facing = [x, z];
+  if (somaSelected && ['directional_2d','crouch_directional_2d'].includes(state.style)) state.facing = cameraRelativeMovement(0,1);
+  else if (length > 0) state.facing = [x, z];
   state.move = [x, z];
   document.documentElement.dataset.controlRight = String(right);
   document.documentElement.dataset.controlForward = String(forward);
@@ -737,7 +750,7 @@ addEventListener('keydown', event => {
   }
   const key = event.key.toLowerCase();
   if (key === 'j' && !event.repeat) { beginJump(); event.preventDefault(); }
-  if (['w', 'a', 's', 'd'].includes(key) && !state.keys.has(key)) {
+  if (['w', 'a', 's', 'd', 'shift'].includes(key) && !state.keys.has(key)) {
     state.keys.add(key); updateControl(); schedulePlan(); event.preventDefault();
   }
   if (event.code === 'Space' || event.key === 'Escape') {
@@ -886,10 +899,15 @@ function buildComparisonShowcase(report) {
   return segments.length === 3 ? {frames: cursor, segments, slices} : null;
 }
 
+function comparisonFrames(plan) {
+  return plan.aligned_frames !== undefined ? Math.max(plan.expected_frames, plan.actual_frames)
+    : Math.min(plan.expected_frames, plan.actual_frames);
+}
+
 function comparisonPosition(frame) {
   if (state.comparisonPlan >= 0) {
     const plan = state.comparison.plans[state.comparisonPlan];
-    const frames = Math.min(plan.expected_frames, plan.actual_frames);
+    const frames = comparisonFrames(plan);
     return {plan, index: THREE.MathUtils.clamp(frame, 0, frames - 1), frames,
       label: null, sequenceFrame: frame};
   }
@@ -912,14 +930,21 @@ function setComparisonPaths(plan) {
 function renderComparison(frame) {
   const report = state.comparison;
   if (!report) return;
-  const position = comparisonPosition(frame);
+  const position = comparisonPosition(Math.floor(frame));
+  const next = comparisonPosition(Math.floor(frame) + 1);
+  // Never interpolate across independent plans or the end of a capture.
+  const alpha = next.plan === position.plan ? frame - Math.floor(frame) : 0;
   const {plan, index} = position;
   setComparisonPaths(plan);
   const width = report.joints * 3;
-  const expectedOffset = index * width;
-  const nativeOffset = index * width;
-  state.rig.poseWorld(plan.expected_joint_positions, expectedOffset);
-  state.nativeRig.poseWorld(plan.native_joint_positions, nativeOffset);
+  const expectedOffset = Math.min(index, plan.expected_frames - 1) * width;
+  const nativeOffset = Math.min(index, plan.actual_frames - 1) * width;
+  const aligned = plan.aligned_frames === undefined || index < plan.aligned_frames;
+  state.errorLines.visible = aligned;
+  state.rig.poseWorld(plan.expected_joint_positions, expectedOffset,
+    Math.min(next.index, plan.expected_frames - 1) * width, alpha);
+  state.nativeRig.poseWorld(plan.native_joint_positions, nativeOffset,
+    Math.min(next.index, plan.actual_frames - 1) * width, alpha);
   const positions = state.errorLines.geometry.attributes.position.array;
   let maximum = 0, square = 0;
   for (let joint = 0; joint < report.joints; joint++) {
@@ -928,27 +953,37 @@ function renderComparison(frame) {
     const line = joint * 6;
     let norm = 0;
     for (let axis = 0; axis < 3; axis++) {
-      positions[line + axis] = plan.expected_joint_positions[expected + axis];
-      positions[line + 3 + axis] = plan.native_joint_positions[native + axis];
-      const difference = positions[line + 3 + axis] - positions[line + axis];
+      positions[line + axis] = state.rig.jointMeshes[joint].position.getComponent(axis);
+      positions[line + 3 + axis] = state.nativeRig.jointMeshes[joint].position.getComponent(axis);
+      // Metrics always describe the original integer capture frame.
+      const difference = plan.native_joint_positions[native + axis] - plan.expected_joint_positions[expected + axis];
       norm += difference * difference;
     }
     maximum = Math.max(maximum, Math.sqrt(norm));
     square += norm;
   }
   state.errorLines.geometry.attributes.position.needsUpdate = true;
-  const rootMetric = plan.metrics.root_m.max;
+  const rootMetric = plan.metrics.root_m?.max;
+  const rootFrame = plan.per_frame?.root_m?.[index];
+  const rotation = plan.per_frame?.rotation_deg?.[index];
   planInfo.textContent = position.label
     ? `${position.label} · sequence ${position.sequenceFrame}/${position.frames - 1} · plan ${plan.index} frame ${index}`
     : `plan ${plan.index} · ${plan.style.replaceAll('_', ' ')} · frame ${index}/${position.frames - 1}`;
   targetInfo.textContent = `frame max ${formatDistance(maximum)} · RMS ${formatDistance(Math.sqrt(square / report.joints))}`;
-  statusElement.textContent = `${plan.duration_exact ? 'duration exact' : 'duration mismatch'} · root max ${formatDistance(rootMetric)}`;
+  if (rootFrame !== undefined) targetInfo.textContent = `root ${formatDistance(rootFrame)} · joint max ${formatDistance(maximum)} · RMS ${formatDistance(Math.sqrt(square / report.joints))}`;
+  statusElement.textContent = plan.duration_exact ? 'duration exact' : `duration mismatch · native ${plan.actual_frames}, reference ${plan.expected_frames} frames`;
+  if (rootMetric !== undefined) statusElement.textContent += ` · ${plan.duration_exact ? '' : 'aligned prefix '}root max ${formatDistance(rootMetric)}`;
+  if (plan.pose_token_mismatches !== undefined) statusElement.textContent += ` · ${plan.pose_token_mismatches} pose token mismatches`;
+  if (rotation !== undefined) targetInfo.textContent += ` · rotation ${rotation.toFixed(6)}°`;
+  if (!aligned) targetInfo.textContent = 'Unaligned after duration mismatch · error measurements unavailable' +
+    (index >= Math.min(plan.expected_frames, plan.actual_frames) ? ' · shorter motion holds its last pose' : '');
   replayFrame.value = String(position.sequenceFrame);
   replayFrameLabel.textContent = `${position.sequenceFrame}/${position.frames - 1}`;
   updateCamera();
 }
 
 function formatDistance(metres) {
+  if (metres < 0.0001) return `${(metres * 1e6).toFixed(2)} µm`;
   return metres < 0.01 ? `${(metres * 1000).toFixed(1)} mm` : `${(metres * 100).toFixed(1)} cm`;
 }
 
@@ -998,10 +1033,15 @@ function animate(now) {
     renderPhysics();
   } else if (state.comparison) {
     const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
-      : Math.min(state.comparison.plans[state.comparisonPlan].expected_frames,
-        state.comparison.plans[state.comparisonPlan].actual_frames);
-    if (state.replayPlaying) state.playhead = (state.playhead + delta * state.comparison.fps) % frames;
-    renderComparison(Math.floor(state.playhead));
+      : comparisonFrames(state.comparison.plans[state.comparisonPlan]);
+    if (state.replayPlaying) {
+      state.playhead = Math.min(frames - 1, state.playhead + delta * state.comparison.fps);
+      if (state.playhead >= frames - 1) {
+        state.replayPlaying = false;
+        replayToggle.textContent = "Replay";
+      }
+    }
+    renderComparison(state.playhead);
   } else if (state.replay) {
     if (state.replayPlaying) state.playhead = (state.playhead + delta * state.replay.fps) % state.replay.frames;
     renderReplay(Math.floor(state.playhead));
@@ -1034,6 +1074,14 @@ function animate(now) {
 }
 
 replayToggle.addEventListener('click', () => {
+  if (state.comparison) {
+    const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
+      : comparisonFrames(state.comparison.plans[state.comparisonPlan]);
+    if (state.playhead >= frames - 1) {
+      state.playhead = 0;
+      cameraFollow.position = null;
+    }
+  }
   if (state.physics && state.physicsTime >= state.physics.times.at(-1)) {
     state.physicsTime = 0;
     cameraFollow.position = null; // Explicit replay jump, not a motion transition.
@@ -1058,8 +1106,7 @@ comparisonPlan.addEventListener('change', () => {
   state.comparisonPlan = Number(comparisonPlan.value);
   state.playhead = 0;
   const frames = state.comparisonPlan < 0 ? state.comparisonShowcase.frames
-    : Math.min(state.comparison.plans[state.comparisonPlan].expected_frames,
-      state.comparison.plans[state.comparisonPlan].actual_frames);
+    : comparisonFrames(state.comparison.plans[state.comparisonPlan]);
   replayFrame.max = String(frames - 1);
   state.comparisonVisiblePlan = -1;
   renderComparison(0);
@@ -1169,6 +1216,56 @@ async function startReplay() {
 }
 
 async function comparisonSelfTest() {
+  if (state.comparison.format === 'motionbricks-soma-chain-view-v1') {
+    state.replayPlaying = false;
+    if (state.comparison.chain_validation) {
+      const verdict = `Chain checks ${state.comparison.chain_validation.passed ? 'passed' : 'failed'}`;
+      if (!document.querySelector('#lede').textContent.includes(verdict)) throw new Error('SOMA chain verdict is missing');
+    }
+    for (const plan of state.comparison.plans) {
+      comparisonPlan.value = String(plan.index);
+      comparisonPlan.dispatchEvent(new Event('change'));
+      const frames = comparisonFrames(plan);
+      renderComparison(0);
+      const sampleMetrics = targetInfo.textContent;
+      renderComparison(0.5);
+      for (const [rig, values] of [[state.rig, plan.expected_joint_positions], [state.nativeRig, plan.native_joint_positions]]) {
+        for (let joint = 0; joint < state.comparison.joints; joint++) {
+          for (let axis = 0; axis < 3; axis++) {
+            const at = joint * 3 + axis;
+            const midpoint = (values[at] + values[state.comparison.joints * 3 + at]) / 2;
+            if (Math.abs(rig.jointMeshes[joint].position.getComponent(axis) - midpoint) > 1e-9)
+              throw new Error('Comparison playback does not interpolate capture frames');
+          }
+        }
+      }
+      if (targetInfo.textContent !== sampleMetrics) throw new Error('Interpolation changed capture metrics');
+      const samples = [0, Math.floor(frames / 2), frames - 1];
+      if (plan.aligned_frames > 0 && plan.aligned_frames < frames) samples.push(plan.aligned_frames - 1, plan.aligned_frames);
+      for (const frame of samples) {
+        renderComparison(frame);
+        if (plan.aligned_frames !== undefined && frame >= plan.aligned_frames) {
+          if (!targetInfo.textContent.includes('error measurements unavailable') || state.errorLines.visible) {
+            throw new Error('SOMA unaligned frames display misleading errors');
+          }
+          continue;
+        }
+        if (!targetInfo.textContent.includes('rotation')) throw new Error('SOMA angular error is missing');
+        if (!targetInfo.textContent.startsWith(`root ${formatDistance(plan.per_frame.root_m[frame])} · joint max `)) {
+          throw new Error('SOMA current-frame root error is missing or stale');
+        }
+      }
+    }
+    renderer.render(scene, camera);
+    const joints = state.comparison.joints;
+    if (state.rig.jointMeshes.length !== joints || state.nativeRig.jointMeshes.length !== joints ||
+        state.errorLines.geometry.attributes.position.count !== joints * 2) throw new Error('SOMA overlay is incomplete');
+    Object.assign(document.documentElement.dataset, {runtime: 'comparison', comparisonPlans: String(state.comparison.plans.length),
+      animatedJoints: String(joints), errorVectors: String(joints), comparisonShowcase: 'SOMA chain',
+      comparisonShowcaseFrames: String(state.comparison.plans[0].actual_frames), testStatus: 'passed'});
+    testResult.textContent = 'SOMA viewer check passed: replay and closed-loop overlay with position and rotation errors';
+    return;
+  }
   if (!state.comparisonShowcase || state.comparisonShowcase.segments.length !== 3 ||
       state.comparisonPlan !== -1 || Number(replayFrame.max) !== state.comparisonShowcase.frames - 1 ||
       state.meta.passed !== true || state.comparison.passed !== true) {
@@ -1202,23 +1299,24 @@ async function comparisonSelfTest() {
 
 async function startComparison() {
   state.comparison = await api('/api/comparison');
-  if (state.comparison.format !== 'motionbricks-open-loop-report-v1' ||
+  const soma = state.comparison.format === 'motionbricks-soma-chain-view-v1';
+  if ((!soma && state.comparison.format !== 'motionbricks-open-loop-report-v1') ||
       state.comparison.fps !== state.meta.fps || state.comparison.joints !== state.meta.joints ||
       state.comparison.plans.length !== state.meta.plans || state.comparison.passed !== state.meta.passed) {
     throw new Error('comparison metadata does not match its report');
   }
   document.documentElement.dataset.comparisonPassed = String(state.comparison.passed);
   const joints = Array.from({length: state.comparison.joints}, (_, index) => ({
-    name: `joint-${index}`, parent: state.comparison.parents[index],
+    name: state.comparison.joint_names?.[index] ?? `joint-${index}`, parent: state.comparison.parents[index],
     position: state.comparison.neutral_joints.slice(index * 3, index * 3 + 3),
   }));
   makeComparisonSkeletons(joints);
   state.comparisonShowcase = buildComparisonShowcase(state.comparison);
-  if (!state.comparisonShowcase) throw new Error('comparison report does not contain the three-motion showcase');
+  if (!soma && !state.comparisonShowcase) throw new Error('comparison report does not contain the three-motion showcase');
   const showcaseOption = document.createElement('option');
   showcaseOption.value = '-1';
   showcaseOption.textContent = 'Showcase · forward walk → right turn → zombie walk';
-  comparisonPlan.append(showcaseOption);
+  if (!soma) comparisonPlan.append(showcaseOption);
   for (const plan of state.comparison.plans) {
     const option = document.createElement('option');
     option.value = String(plan.index);
@@ -1241,8 +1339,20 @@ async function startComparison() {
   const verdict = state.comparison.passed ? 'Strict parity passed.' : 'Strict parity failed.';
   document.querySelector('#lede').textContent = `${verdict} Open-loop comparison of forward walking, a right turn, and zombie walking. Each replan starts from the same recorded upstream context.`;
   document.querySelector('#camera-help').textContent = 'Drag to orbit · wheel to zoom · solid green is upstream, blue diamonds are native';
+  if (soma) {
+    document.title = 'MotionBricks SOMA';
+    document.querySelector('.eyebrow').textContent = 'MOTIONBRICKS / SOMA';
+    document.querySelector('#viewport').setAttribute('aria-label', 'Animated SOMA skeleton comparison');
+    const chainVerdict = state.comparison.chain_validation
+      ? `Chain checks ${state.comparison.chain_validation.passed ? 'passed' : 'failed'}` : 'Parity in progress';
+    document.querySelector('#lede').textContent = `${state.comparison.precision.toUpperCase()} · ${chainVerdict}. Compare replay and independent feedback.`;
+    document.querySelector('#lede').title = `Pinned NVIDIA source: ${state.comparison.source_revision}. Checks cover this captured chain only; full SOMA parity remains in progress.`;
+    document.querySelector('#target-info').previousElementSibling.textContent = 'Frame error';
+    const errorRow = document.querySelector('#target-info').parentElement;
+    errorRow.parentElement.prepend(errorRow);
+  }
   document.querySelector('#backend').textContent = `${state.comparison.device} parity report`;
-  comparisonPlan.value = '-1';
+  comparisonPlan.value = soma ? '0' : '-1';
   comparisonPlan.dispatchEvent(new Event('change'));
   requestAnimationFrame(animate);
   if (query.get('test') === '1') await comparisonSelfTest();
@@ -1338,15 +1448,15 @@ async function installPhysics() {
 }
 
 async function installStream() {
-  const response=await fetch('/api/stream');if(response.status===404)return false;
+  const response=await fetch(modelURL('/api/stream'));if(response.status===404)return false;
   if(!response.ok)throw new Error('Cannot query streaming capabilities');
   const capability=await response.json();if(!capability.available)return false;
   const section=document.querySelector('#live-physics-controls'),toggle=document.querySelector('#live-physics');
   const reset=document.querySelector('#live-physics-reset'),pause=document.querySelector('#stream-pause');
   const collisionToggle=document.querySelector('#show-collisions');
   collisionToggle.disabled=!capability.physics;
-  section.hidden=false;toggle.disabled=!capability.physics;reset.textContent='Reset session';pause.hidden=false;
-  state.session='server-stream';state.targets={frames:0,joints:34,roots:[],rotations:[]};
+  section.hidden=false;toggle.closest("label").hidden=somaSelected;collisionToggle.closest("label").hidden=somaSelected;toggle.disabled=!capability.physics;reset.textContent='Reset session';pause.hidden=false;
+  state.session='server-stream';state.targets={frames:0,joints:state.meta.joints.length,roots:[],rotations:[]};
   const s=state.stream={client:null,rig:null,label:null,paused:false,physics:false,owner:false,rendered:null,lastEpoch:null,error:''};
   const info=document.querySelector('#live-physics-status');
   const prepareCollisions=()=>{
@@ -1364,8 +1474,8 @@ async function installStream() {
     if(message.type==='error') {s.error=message.error;info.textContent=message.error;statusElement.textContent=`Simulation stopped: ${message.error}`;document.documentElement.dataset.streamError=message.error;return;}
     if(message.type==='ack') {document.documentElement.dataset.streamAck=JSON.stringify(message);if(message.state==='rejected')info.textContent=message.error;return;}
     if(message.type==='targets') {
-      state.targets=message.targets??{frames:0,joints:34,roots:[],rotations:[]};
-      for(let i=0;i<state.targets.frames;i++)state.targetRigs[i].pose(state.targets.roots,state.targets.rotations,i,state.targets.frames);
+      state.targets=message.targets??{frames:0,joints:state.meta.joints.length,roots:[],rotations:[]};
+      for(let i=0;i<state.targets.frames;i++)state.targetRigs[i].pose(state.targets.roots,state.targets.rotations,i,state.targets.frames,state.targets.local_positions);
       document.documentElement.dataset.planSequence=String(Number(document.documentElement.dataset.planSequence||0)+1);
       updateTargetVisibility();return;
     }
@@ -1402,7 +1512,7 @@ async function installStream() {
       if(message.error)info.textContent=`${message.error}. Disable Live physics to continue the reference animation, or Reset session to start over.`;
       else info.textContent=`WebSocket · ${s.physics?`GGML SONIC + MuJoCo ${capability.mujoco_version??''}`:'kinematic reference'} · ${message.paused?'paused':'50 Hz server stream'} · ${client.buffer.underruns} playback underruns${message.fallen?' · Fall detected; physics continues':''}`;
     }
-  });
+  }, {model: somaSelected ? 'soma' : 'g1', joints: state.meta.joints.length});
   toggle.addEventListener('change',()=>client.send('physics',{enabled:toggle.checked}));
   collisionToggle.addEventListener('change',()=>{if(collisionToggle.checked){try{prepareCollisions()}catch(error){collisionToggle.checked=false;info.textContent=`Collision overlay unavailable: ${error.message}`;}}});
   reset.addEventListener('click',()=>client.send('reset'));
@@ -1418,8 +1528,9 @@ function renderStream(delta) {
   const s=state.stream,sample=s.client.buffer.sample(delta);if(!sample)return;
   const {a,b,alpha}=sample;
   const roots=[...a.root,...b.root],rotations=[...a.rotations,...b.rotations];
-  state.motion={frames:2,joints:34,roots,rotations};state.playhead=alpha;
-  state.rig.poseInterpolated(roots,rotations,alpha,2);
+  const localPositions=a.local_positions ? [...a.local_positions,...b.local_positions] : null;
+  state.motion={frames:2,joints:state.meta.joints.length,roots,rotations,local_positions:localPositions};state.playhead=alpha;
+  state.rig.poseInterpolated(roots,rotations,alpha,2,localPositions);
   const root=a.root.map((v,i)=>v+(b.root[i]-v)*alpha);
   let physical=null;
   if(a.physics&&b.physics&&a.physical&&b.physical) {
@@ -1561,9 +1672,36 @@ function renderLivePhysics() {
   updateCamera();
 }
 
+async function installModels() {
+  const response = await fetch('/api/models');
+  if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
+  const models = await response.json(), select = document.querySelector('#model-select');
+  for (const model of models) {
+    const option = document.createElement('option'); option.value = model.id; option.textContent = model.name; select.append(option);
+  }
+  select.value = somaSelected ? 'soma' : 'g1';
+  if (!select.value) throw new Error('Requested model is not available on this server');
+  document.querySelector('#model-controls').hidden = false;
+  select.addEventListener('change', () => {
+    const url = new URL(location.href); url.searchParams.set('model', select.value);
+    url.searchParams.delete('physics'); location.assign(url);
+  });
+  if (somaSelected) {
+    document.title = 'MotionBricks SOMA';
+    document.querySelector('.eyebrow').textContent = 'MOTIONBRICKS / SOMA';
+    viewport.setAttribute('aria-label', 'Interactive SOMA skeleton');
+    document.querySelector('#lede').textContent = 'Move with WASD; hold Shift for maximum speed. Strafing and crouching face the camera direction.';
+    document.querySelector('.live-actions').hidden = true;
+    document.querySelector('#backend').textContent = 'Native SOMA · FP32';
+  }
+}
+
+window.addEventListener('pagehide', () => state.stream?.client.close());
+
 async function start() {
   try {
-    if (await installPhysics()) return;
+    await installModels();
+    if (!somaSelected && await installPhysics()) return;
     state.meta = await api('/api/meta');
     if (state.meta.runtime === 'comparison') {
       await startComparison();
@@ -1574,16 +1712,16 @@ async function start() {
       return;
     }
     installStyles(state.meta.styles);
-    installKimodo(state.meta.kimodo_clips);
+    if (!somaSelected) installKimodo(state.meta.kimodo_clips);
     makeSkeletons(state.meta.joints);
     installMotionQAHook();
     if(await installStream()) {requestAnimationFrame(animate);document.documentElement.dataset.testStatus='ready';return;}
     const initial = await api('/api/session', {style: state.style});
     useMotion(initial);
-    await installLivePhysics();
+    if (!somaSelected) await installLivePhysics();
     renderMotion(0);
     requestAnimationFrame(animate);
-    if (query.get('test') === '1') await selfTest();
+    if (!somaSelected && query.get('test') === '1') await selfTest();
     else document.documentElement.dataset.testStatus = 'ready';
   } catch (error) {
     console.error(error);
