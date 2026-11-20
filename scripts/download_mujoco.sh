@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Official, pinned SDK for the native demo; the Docker reference stays 3.3.5.
 set -euo pipefail
-version=3.12.0
+version=4.0.1
 case "$(uname -s)/$(uname -m)" in
-  Linux/x86_64) platform=linux-x86_64; sha=a9367911e6d5eaeade17c2197304687421c1fc932cdf7bcd4cb8cfaf0374dcb2 ;;
-  Linux/aarch64|Linux/arm64) platform=linux-aarch64; sha=08fd5627a2ef7d5a42580c40e014ab2c1a644f082010c584ca361a3ed8cad838 ;;
+  Linux/x86_64) platform=linux-x86_64; sha=8df1308b2900a4ed6c18717ebbc9d66d53ab3fe7a4da860a7d5b21f94607299d ;;
+  Linux/aarch64|Linux/arm64) platform=linux-aarch64; sha=e16dc0ed24d31279bce674bd03b9f8ef75f209d1189befe67b7c3b366978a6b3 ;;
   *) echo 'Use the official MuJoCo SDK for your platform and set MUJOCO_INCLUDE_DIR/MUJOCO_LIBRARY.' >&2; exit 1 ;;
 esac
 parent=${1:-generated/sonic}

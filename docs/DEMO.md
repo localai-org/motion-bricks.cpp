@@ -13,6 +13,73 @@ The native viewer sends commands over WebSocket and interpolates timestamped
 poses from the server-owned simulation. See [streaming and client QA](STREAMING.md)
 for playback buffering, reconnect/ownership and numerical safety checks.
 
+## Selectable G1 and SOMA interactive models
+
+Add `-soma-model` and `-soma-assets` to the normal G1 startup command to expose
+**Motion model → G1 robot / SOMA human**. G1 retains its streaming controller,
+Kimodo uploads and optional SONIC physics. SOMA uses native FP32 inference,
+its 77-joint skeleton and the same server-owned streaming controller as G1.
+Each model has an independent streamed session. Switching models reloads the
+viewer and reconnects to the selected model; Reset session starts it over.
+
+```sh
+nix develop --command go run -C demo . \
+  -listen 0.0.0.0:18087 \
+  -library "$PWD/build/debug/libmotionbricks.so" \
+  -model ../generated/g1-f32 -styles ../generated/styles \
+  -soma-model ../generated/soma/export-scales \
+  -soma-assets ../generated/soma/controller-reference-001/controller-assets.json \
+  -device vulkan
+```
+
+Use `?model=soma` to open SOMA directly, or choose it in the model selector.
+WASD/the direction pad moves the character; arrow keys set facing. Controller
+assets expose upstream's nine modes: linear, directional, crouch directional,
+skipping, vogue, injured torso, injured leg, zombie and combat. The controller
+handles speed blends, fast movement, stopping and restarting. SOMA has no jump,
+Kimodo or SONIC controls.
+
+Both models share the server-owned streaming transport, worker and browser
+playback buffer. SOMA's per-tick controller follows the standalone upstream
+movement springs, target blends and regeneration decisions. It calls the same
+opaque `mb_model`/`mb_inference_request` API as other inference consumers; there
+is no separate SOMA C API. G1 retains its existing planning policy.
+
+The browser uses the same timestamped interpolation buffer for both models.
+SOMA's optional local joint translations are interpolated alongside rotations.
+This controller does not apply SOMA foot locking or IK.
+
+The viewer shows the actual placed target poses. These are constraints for new
+native generation, not prerecorded output or an upstream replay. Numerical
+parity inspection remains available separately through `-comparison`.
+
+### Prepare interactive SOMA assets
+
+Use the pinned upstream checkout and Python environment from
+[the reference setup](../reference/README.md). The controller capture exports
+the skeleton, target blends and clips used by the interactive demo:
+
+```sh
+python reference/capture_soma_controller.py --upstream "$SOMA_UPSTREAM" \
+  --checkpoints generated/soma/reference/soma \
+  --output generated/soma/controller-reference-001
+```
+
+Pass the resulting `controller-assets.json` to `-soma-assets`. Use a fresh output
+name when regenerating; captures refuse to overwrite existing evidence. The Go
+server only needs these exported assets and the GGUF bundle at runtime.
+The older `prepare_soma_interactive.py` flat-style assets remain supported for
+legacy comparisons, but do not provide the upstream controller's mode blends.
+
+`TestSOMAStreamPlanner` validates FK against upstream poses, movement directions,
+turning, stopping and mid-transition full-pose continuity. Configure `MOTIONBRICKS_LIB`,
+`MOTIONBRICKS_SOMA_MODEL`, `MOTIONBRICKS_SOMA_ASSETS` and optionally
+`MOTIONBRICKS_DEVICE=vulkan`. `TestDualModelBrowser` exercises actual movement,
+style changes, rendered direction-change latency and SOMA → G1 → SOMA selection against `MOTIONBRICKS_DEMO_URL`
+with `MOTIONBRICKS_CHROME` pointing to Chromium. Set
+`MOTIONBRICKS_SOMA_ALL_STYLES=1` to also require the full catalog and check
+that every selected style reaches rendered playback.
+
 ## Build and run
 
 For optional actuator-driven simulation, enable **Live physics · GGML SONIC**
@@ -307,3 +374,89 @@ and the native/browser integration cases are skipped.
 - HTTP JSON carries whole planned chunks; binary streaming is future work.
 - Sessions are in-memory and intended for a trusted local demo, not an
   internet-facing multi-user service.
+
+### SOMA chained comparison
+
+The comparison viewer overlays native and upstream 77-joint motion at 30 Hz.
+Choose **closed loop** to let each implementation feed its final four corrected
+poses into its next request, or **replay** to give native inference the reference
+context. Shared endpoints appear once. This covers chained generation and
+endpoint handling; it does not implement the upstream asynchronous player.
+
+Open a passing Vulkan mixed-FP16 capture:
+
+```sh
+nix develop --command go run -C demo . \
+  -comparison ../generated/soma/chain-walk-vulkan-coexist-trial/demo.json
+```
+
+Replace `walk` with `sit` or `zombie`. Rendering saved captures needs no GPU or
+model weights. These captures pass all three transitions in both modes. The
+qualified public Vulkan API independently reproduces their raw features,
+corrected/world transforms and contacts exactly (72 comparisons, 1,111,048
+values); see `generated/soma/public-vulkan-sm120-chain-audit/demo-api-equivalence.json`.
+The supported device/driver and precision choices are in [API-SOMA.md](API-SOMA.md).
+
+Other passing captures are:
+
+- FP32 Vulkan: `generated/soma/chain-{walk,sit,zombie}-fp32-vulkan-export-scales/demo.json`.
+- Calibrated CPU mixed-FP16: `generated/soma/chain-{walk,sit,zombie}-half-cpu-rotation-matmul-trial/demo.json`.
+
+The viewer shows per-frame joint-position and rotation error, current root
+position error, maximum root error, duration agreement and pose-token mismatches.
+Scrubbing or changing replay/closed-loop mode updates the measurements. Very
+small positional errors are displayed in micrometres. **Chain checks passed**
+applies to the displayed capture: strict limits are 0.1 mm local/world joint
+position, 0.01° local/world rotation, 1e-4 contact error, exact durations, and exact
+pose-token decisions. It is not a claim about arbitrary motions or GPUs.
+
+For a duration mismatch, both complete motions play on the same 30 Hz clock;
+the shorter motion holds its final pose. Metrics cover only the prefix before
+the first mismatched transition. Later frames show **Unaligned after duration
+mismatch**, with error vectors and numerical frame errors hidden. The viewer
+keeps the failed verdict and both frame counts visible without resampling.
+
+To generate and check a new FP32 chain against the pinned standalone source:
+
+```sh
+.cache/soma-reference-venv/bin/python reference/run_soma_chain.py \
+  --upstream /path/to/pinned-motionbricks \
+  --checkpoints generated/soma/reference/soma --bundle generated/soma/export-scales \
+  --runner build/sonic-cpu/tests/motionbricks-soma-run \
+  --motion assets/motions/soma/locomotion/bs_1d_linear/Neutral_walk_forward_002__A057.bvh \
+  --target-times 1 1.5 2 --output generated/soma/chain-walk-new
+.cache/soma-reference-venv/bin/python reference/check_soma_chain.py \
+  --chain generated/soma/chain-walk-new \
+  --output generated/soma/chain-walk-new/acceptance.json
+.cache/soma-reference-venv/bin/python reference/export_soma_demo.py \
+  --chain generated/soma/chain-walk-new \
+  --acceptance generated/soma/chain-walk-new/acceptance.json \
+  --output generated/soma/chain-walk-new/demo.json
+```
+
+Use a fresh output directory. The exporter checks that acceptance hashes match
+the exact chain arrays and report. Source/capture identities, runner and bundle
+hashes, and supplied runtime-artifact hashes accompany the comparison. Without
+an acceptance report the viewer shows measured errors without a passing verdict.
+See [the reference workflow](../reference/README.md) for independent capture,
+calibration, layer taps, runtime pinning and mixed-FP16 reproduction.
+
+Browser validation for a saved capture:
+
+```sh
+nix develop --command env \
+  MOTIONBRICKS_CHROME=/run/current-system/sw/bin/chromium \
+  MOTIONBRICKS_COMPARISON="$PWD/generated/soma/chain-walk-vulkan-coexist-trial/demo.json" \
+  MOTIONBRICKS_COMPARISON_SCREENSHOT="$PWD/generated/soma/soma-comparison.png" \
+  go test -C demo -run 'Test(ComparisonHTTPFlow|HeadlessComparison)$' -count=1 -v
+```
+
+
+For upstream SOMA locomotion behavior, pass
+`-soma-assets generated/soma/controller-reference-001/controller-assets.json`
+with `-soma-model generated/soma/export-scales`. This exports all nine upstream
+modes, including forward walk/jog/run blending, strafing and crouching. Hold Shift
+for maximum speed; no movement transitions into an authored idle loop. The
+model selector continues to offer G1. The old style-only asset files remain
+compatible but do not enable the validated upstream controller policy. Capture
+and parity commands are in [reference/README.md](../reference/README.md#soma-interactive-controller-parity).

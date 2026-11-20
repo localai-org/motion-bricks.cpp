@@ -5,8 +5,9 @@
 extern "C" {
 #endif
 
-/* Stateless, composed G1 MotionBricks inference. See docs/API-INFERENCE.md.
-   No style selection, springs, agent state, seam blending or world placement.
+/* Stateless, composed MotionBricks inference (G1 or SOMA). See docs/API-INFERENCE.md.
+   No style selection, springs or agent state. G1 returns raw boundary frames;
+   SOMA returns endpoint-corrected poses (see the retargeting setters below).
    Use a common canonical Y-up, metre, 30 FPS frame for both boundaries.
    All handles are opaque. Setters copy inputs; getters copy into caller buffers.
    Serialize calls sharing a model (including agent calls), and calls sharing a
@@ -56,6 +57,35 @@ MB_API mb_status mb_inference_request_get_sampling_argmax(const mb_inference_req
 MB_API mb_status mb_inference_request_set_boundary_poses(mb_inference_request * request,
     const mb_model * model, uint32_t boundary, const float * roots, uint64_t root_count,
     const float * local_xyzw, uint64_t rotation_count, char * error, uint64_t error_capacity);
+
+/* Retargetable pose inference. All setters copy data and are transactional.
+   SOMA: 30..256 joints, topologically ordered parents, root index zero.
+   Reference is joints*7 XYZ/XYZW floats; mapping has 30 unique model-to-pose
+   indices. Heading joints must be distinct. Configure before boundaries.
+   Reconfiguring the skeleton clears both boundaries. G1 does not use this. */
+MB_API mb_status mb_inference_request_set_skeleton(mb_inference_request *, uint32_t joints,
+    const int32_t * parents, const float * reference, uint64_t reference_count,
+    const uint32_t * mapping, uint64_t mapping_count, uint32_t right, uint32_t left, char *, uint64_t);
+/* Boundary 0: four context frames. Boundary 1: one to four target frames.
+   Frame-major [frames,joints,7], local XYZ metres and XYZW in model Y-up space.
+   Finite values within +/-1e4; unit quaternions within squared-norm tolerance .02.
+   SOMA returns endpoint-corrected motion, removing three frames at each end. */
+MB_API mb_status mb_inference_request_set_boundary_transforms(mb_inference_request *, uint32_t boundary,
+    const float *, uint64_t count, char *, uint64_t);
+MB_API mb_status mb_inference_request_get_boundary_transforms(const mb_inference_request *, uint32_t boundary,
+    float *, uint64_t capacity, uint64_t * count, char *, uint64_t);
+#define MB_PRECISION_FP32 UINT32_C(0)
+#define MB_PRECISION_MIXED_FP16_EXPERIMENTAL UINT32_C(1)
+#define MB_PRECISION_MIXED_FP16_SM120_EMULATED UINT32_C(2)
+#define MB_PRECISION_MIXED_FP16_VULKAN_SM120 UINT32_C(3)
+/* Default FP32; nonzero profiles currently require SOMA. Vulkan SM120 is
+   qualified only on RTX 5070 Ti/595.71.05 with exact normalization scales.
+   CPU emulation requires model calibration. Unsupported configurations fail. */
+MB_API mb_status mb_inference_request_set_precision(mb_inference_request *, uint32_t, char *, uint64_t);
+MB_API mb_status mb_inference_request_get_precision(const mb_inference_request *, uint32_t *, char *, uint64_t);
+/* Canonical model-space heading atan2(x,z), radians; default zero. */
+MB_API mb_status mb_inference_request_set_heading(mb_inference_request *, float, char *, uint64_t);
+MB_API mb_status mb_inference_request_get_heading(const mb_inference_request *, float *, char *, uint64_t);
 
 /* Features are raw (not normalized), finite, |value|<=1e4. Returns 24..64 frames
    in multiples of four; duration is argmax among the enabled choices. Output

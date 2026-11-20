@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "source_repository": "https://github.com/NVlabs/motionbricks",
+  "source_revision": "54fc563aeaaf819a753d72cc9fdc6713989cdd43",
+  "checkpoint_repository": "nvidia/MotionBricks",
+  "checkpoint_revision": "3cb362d9b95aa40462abcb4d8cfae9ffb6d97410",
+  "checkpoint_precision": "fp32",
+  "export_precisions": [
+    "fp32",
+    "mixed-fp16"
+  ],
+  "checkpoints": [
+    {
+      "path": "soma/soma-v6-nova-4n8g-ea43dd8-fp32-v1/mmm-v6-soma-pose-nova-4n8g-ea43dd8-fp32-v1/version_0/checkpoints/model-step=1500000.safetensors",
+      "bytes": 546109841,
+      "sha256": "8537d9d33a880ff1df6c16c28ed061d60c461a5918d70b1cf99251ff91a10a10"
+    },
+    {
+      "path": "soma/soma-v6-nova-4n8g-ea43dd8-fp32-v1/mmm-v6-soma-pose-nova-4n8g-ea43dd8-fp32-v1/version_0/stats/motion/mean.npy",
+      "bytes": 3088,
+      "sha256": "802f79631ea88a1a920cf44725f5d0e9973a0c8d7adb5359b01bd7a5af57492d"
+    },
+    {
+      "path": "soma/soma-v6-nova-4n8g-ea43dd8-fp32-v1/mmm-v6-soma-pose-nova-4n8g-ea43dd8-fp32-v1/version_0/stats/motion/std.npy",
+      "bytes": 3088,
+      "sha256": "1a97818fea2a10e562de059013b081ecf7943d6815a36396f0d94f54ad26acb6"
+    },
+    {
+      "path": "soma/soma-v6-nova-4n8g-ea43dd8-fp32-v1/mmm-v6-soma-root-nova-4n8g-ea43dd8-fp32-v1/version_0/checkpoints/model-step=1500000.safetensors",
+      "bytes": 161695084,
+      "sha256": "a48d48c3d8ff98c825ca315797644789ae37f2db9069779a3118f42e84f4f29e"
+    },
+    {
+      "path": "soma/soma-v6-nova-4n8g-ea43dd8-fp32-v1/vqvae-v6-soma-nova-4n8g-ea43dd8-fp32-v1/version_0/checkpoints/model-step=1500000.safetensors",
+      "bytes": 93442464,
+      "sha256": "ba0d1db48ba7182ef5d1a72268bfaa1a196f1f1fbf00144c046d947b90684a1a"
+    }
+  ],
+  "source_assets": [
+    {
+      "path": "tools/onnx/assets/soma_model_rig.npz",
+      "sha256": "a3a349e4dd10b13731528c8613bd564629df9b8444201bd9278a5c414ffd2b40",
+      "bytes": 1184
+    },
+    {
+      "path": "motionbricks/assets/onnx/soma/mmm_v6_soma_fp32.onnx",
+      "sha256": "856419dc72aeb14e591eebf4dd0ea05734a2506ddb00bcd39dd6dac2ad60f4fb",
+      "bytes": 757864273
+    },
+    {
+      "path": "motionbricks/assets/onnx/soma/mmm_v6_soma_fp16.onnx",
+      "sha256": "6c9f78e23decbda8e1cfd1b0cc96980ea4b24b3ca2c808d03b058f48f82fc9ef",
+      "bytes": 380327058
+    }
+  ]
+}

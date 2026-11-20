@@ -4,7 +4,7 @@ The original released **GEAR-SONIC G1 mode-0** policy now runs in native C++
 on GGML CPU and Vulkan. Its encoder, FSQ32 tokens, decoder and composed actions
 are checked against the pinned official ONNX, not against another GGML run.
 There is no ONNX Runtime, TensorRT, DDS or Python inference dependency in the
-demo. Optional native **MuJoCo 3.12.0** supplies simulation, not inference.
+demo. Optional native **MuJoCo 4.0.1** supplies simulation, not inference.
 The upstream Docker reference remains pinned to 3.3.5; see the
 [upgrade notes and verification](MUJOCO-UPGRADE.md).
 
@@ -67,15 +67,15 @@ nor does passing neural parity guarantee successful physical tracking.
 ## Build and prepare assets
 
 Use the normal Linux build instructions first. For physics, install the native
-MuJoCo 3.12.0 SDK and enable the optional build. The helper downloads the official
+MuJoCo 4.0.1 SDK and enable the optional build. The helper downloads the official
 Linux x86-64/AArch64 release and checks its SHA-256:
 
 ```sh
 bash scripts/download_mujoco.sh
-MUJOCO_SDK="$PWD/generated/sonic/mujoco-3.12.0"
+MUJOCO_SDK="$PWD/generated/sonic/mujoco-4.0.1"
 cmake --preset debug -DMOTIONBRICKS_ENABLE_PHYSICS=ON \
   -DMUJOCO_INCLUDE_DIR="$MUJOCO_SDK/include" \
-  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.3.12.0"
+  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.4.0.1"
 cmake --build --preset debug
 (cd demo && CGO_ENABLED=0 go build -o ../build/debug/bin/motionbricks-demo .)
 ```

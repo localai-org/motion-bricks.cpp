@@ -1,6 +1,7 @@
 #include "root.hpp"
 
 #include "neural_runtime.hpp"
+#include "neural_precision.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,11 +16,33 @@
 #if defined(MOTIONBRICKS_HAVE_GGML)
 #include <ggml-backend.h>
 #include <ggml.h>
+#include "soma_aligned_ggml.hpp"
 #endif
 
 namespace motionbricks::detail {
 namespace {
 #if defined(MOTIONBRICKS_HAVE_GGML)
+
+struct root_layout { std::uint32_t pose_width, shared_layers, token_layers; };
+
+std::size_t root_graph_capacity(ggml_context * context) {
+    // Attention and convolution branches add nodes per request. Count the graph
+    // tensors already constructed rather than guessing from a small batch.
+    // The supported root models have fewer than 1024 external weight leaves.
+    std::size_t capacity=1024;
+    for(auto * tensor=ggml_get_first_tensor(context);tensor; tensor=ggml_get_next_tensor(context,tensor))++capacity;
+    return std::max<std::size_t>(4096,capacity);
+}
+
+bool get_root_layout(const neural_runtime & runtime, root_layout & layout, std::string & reason) {
+    const auto * projection = neural_weight(runtime, "root", "_proj_local_pose.weight");
+    if (!projection || (projection->ne[0] != 304 && projection->ne[0] != 268)) {
+        reason = "unsupported root pose projection";
+        return false;
+    }
+    layout = projection->ne[0] == 268 ? root_layout{268, 6, 2} : root_layout{304, 3, 3};
+    return true;
+}
 
 struct context_deleter { void operator()(ggml_context * value) const noexcept { ggml_free(value); } };
 struct buffer_deleter {
@@ -35,9 +58,110 @@ ggml_tensor * weight(const neural_runtime & runtime, const std::string & name,
     return result;
 }
 
+// Stable semantic labels connect native graph snapshots to upstream module outputs.
+ggml_tensor * label_output(ggml_tensor * output, ggml_tensor * bias) {
+    std::string name=ggml_get_name(bias);
+    if(name.ends_with(".bias"))name.resize(name.size()-5);
+    ggml_set_name(output,name.c_str());
+    return output;
+}
+
+ggml_tensor * named_relu(ggml_context * context, ggml_tensor * input) {
+    auto * output=half_round(context,ggml_relu(context,half_round(context,input)));
+    std::string name=ggml_get_name(input);
+    if(name.ends_with(".linear1"))name.replace(name.size()-8,8,".dropout");
+    else if(name.ends_with(".conv1"))name.replace(name.size()-6,6,".activation2");
+    else if(name=="_proj_input.0" || name=="decoder.model.0" || name=="decoder.model.4" ||
+            name=="_conv_output.model.0" || name=="_conv_output.model.4" ||
+            name.find("cond_blocks.")!=std::string::npos)++name.back();
+    else name.clear();
+    if(!name.empty())ggml_set_name(output,name.c_str());
+    return output;
+}
+
+ggml_tensor * named_view(ggml_context * context, ggml_tensor * input, const std::string & name) {
+    auto * output=ggml_view_4d(context,input,input->ne[0],input->ne[1],input->ne[2],input->ne[3],input->nb[1],input->nb[2],input->nb[3],0);
+    ggml_set_name(output,name.c_str());return output;
+}
+
+ggml_tensor * named_leaky_relu(ggml_context * context, ggml_tensor * input, float slope, bool inplace) {
+    if(neural_half_arithmetic)slope=ggml_fp16_to_fp32(ggml_fp32_to_fp16(slope));
+    auto * output=half_round(context,ggml_leaky_relu(context,half_round(context,input),slope,inplace));
+    std::string name=ggml_get_name(input);
+    const auto pos=name.find(".fc_layers.");
+    if(pos!=std::string::npos)name.replace(pos,11,".relu_layers.");
+    ggml_set_name(output,name.c_str());return output;
+}
+ggml_tensor * named_rows(ggml_context * context, ggml_tensor * weight, ggml_tensor * indices) {
+    auto * output=half_round(context,ggml_get_rows(context,half_round(context,weight),indices));
+    std::string name=ggml_get_name(weight);
+    if(name.ends_with(".weight"))name.resize(name.size()-7);
+    ggml_set_name(output,name.c_str());return output;
+}
+
 ggml_tensor * linear(ggml_context * context, ggml_tensor * input,
                      ggml_tensor * matrix, ggml_tensor * bias) {
-    return ggml_add(context, ggml_mul_mat(context, matrix, input), bias);
+    const std::string matrix_name=ggml_get_name(matrix);
+    const bool nvjet_qkv=matrix->ne[1]==1536 && matrix_name.ends_with("self_attn.in_proj_weight");
+    // The full output weight name is 64 bytes and GGML truncates it to 63.
+    // Its bias name fits, so use that stable label for this dispatch.
+    const bool nvjet_output=matrix->ne[1]==512 && std::string(ggml_get_name(bias)).ends_with("self_attn.out_proj.bias");
+    const bool nvjet_linear1=matrix->ne[0]==512 && matrix->ne[1]==2048 && matrix_name.ends_with("linear1.weight");
+    const bool nvjet_linear2=matrix->ne[0]==2048 && matrix->ne[1]==512 && matrix_name.ends_with("linear2.weight");
+    if(neural_half_arithmetic && neural_backend_nvjet_split4_trial &&
+       ((nvjet_linear2 && matrix_name.starts_with("_root_token_transformer_model.")) ||
+        (matrix->ne[0]==1536 && matrix->ne[1]==512 && matrix_name=="_conv_output.external_cond_blocks.2.weight"))) {
+        auto * product=precision_backend_nvjet_split4(context,matrix,input);
+        return label_output(precision_add(context,half_round(context,product),bias),bias);
+    }
+    if(neural_half_arithmetic && neural_backend_nvjet8_trial && matrix->ne[0]==512 &&
+       matrix_name.starts_with("_root_token_transformer_model.") && nvjet_output) {
+        auto * product=precision_backend_nvjet(context,matrix,input,8);
+        return label_output(half_round(context,ggml_add(context,product,half_round(context,bias))),bias);
+    }
+    if(neural_half_arithmetic && neural_backend_nvjet3_trial && matrix->ne[0]==512 &&
+       matrix_name.starts_with("_root_token_transformer_model.") && (nvjet_qkv||nvjet_linear1)) {
+        auto * product=precision_backend_nvjet(context,matrix,input);
+        return label_output(precision_add(context,half_round(context,product),bias),bias);
+    }
+    if(neural_half_arithmetic && neural_aligned_matmul_trial && (matrix->ne[0]==512 || nvjet_linear2) &&
+       matrix_name.starts_with("_root_token_transformer_model.") && (nvjet_qkv||nvjet_output||nvjet_linear1||nvjet_linear2)) {
+        auto * product=soma_aligned_product(context,half_round(context,matrix),half_round(context,input),false,nvjet_linear2?4:nvjet_output?8:3);
+        // MatMul stores a half product before Add; Gemm fuses the bias in FP32.
+        if(!nvjet_output)product=half_round(context,product);
+        return label_output(half_round(context,ggml_add(context,product,half_round(context,bias))),bias);
+    }
+    if(neural_half_arithmetic && neural_aligned_matmul_trial && matrix->ne[0]==1536 &&
+       matrix->ne[1]==512 && matrix_name=="_conv_output.external_cond_blocks.2.weight") {
+        auto * product=soma_aligned_product(context,half_round(context,matrix),half_round(context,input),false,4);
+        return label_output(precision_add(context,half_round(context,product),bias),bias);
+    }
+    if(neural_half_arithmetic && (neural_aligned_root_trial||neural_backend_split_root_trial) && matrix->ne[1]==512 &&
+       ((matrix->ne[0]==2048 && matrix_name.starts_with("_shared_transformer_model.") &&
+         matrix_name.ends_with("linear2.weight")) ||
+        (matrix->ne[0]==2560 && matrix_name=="_conv_output.external_cond_blocks.0.weight"))) {
+        auto * product=neural_backend_split_root_trial?precision_backend_split8(context,matrix,input,neural_backend_conditioning_trial):
+            soma_aligned_split8(context,half_round(context,matrix),half_round(context,input));
+        return label_output(precision_add(context,half_round(context,product),bias),bias);
+    }
+    // The 4/5-wide root projections also need matrix-core accumulation: the
+    // vector reduction can land on an FP16 midpoint and change a pose code.
+    if(neural_half_arithmetic && neural_backend_prefix_trial &&
+       (matrix_name=="_proj_local_pose.weight" || matrix_name=="_proj_local_root_value.weight" ||
+        matrix_name=="_proj_global_root_value.weight" || matrix_name.starts_with("_proj_start_input.") ||
+        matrix_name.starts_with("_proj_end_input."))) {
+        auto * product=precision_backend_prefix_product(context,matrix,input);
+        const bool trace_projection=matrix_name=="_proj_local_root_value.weight" ||
+            matrix_name=="_proj_global_root_value.weight";
+        const auto stem=matrix_name.substr(0,matrix_name.size()-7);
+        if(trace_projection)ggml_set_name(product,(stem+".matmul_f32").c_str());
+        product=half_round(context,product);
+        if(trace_projection)ggml_set_name(product,(stem+".matmul_half").c_str());
+        return label_output(precision_add(context,product,bias),bias);
+    }
+    return label_output(precision_linear(context,input,matrix,bias,
+        (std::string(ggml_get_name(bias)).find("self_attn.out_proj")!=std::string::npos ||
+         std::string(ggml_get_name(bias))=="_proj_num_token_output_logit.bias")),bias);
 }
 
 ggml_tensor * leaky_mlp(ggml_context * context, const neural_runtime & runtime,
@@ -46,7 +170,7 @@ ggml_tensor * leaky_mlp(ggml_context * context, const neural_runtime & runtime,
     auto * hidden = input;
     for (unsigned layer = 0; layer < 2U; ++layer) {
         const auto stem = prefix + ".fc_layers." + std::to_string(layer) + ".";
-        hidden = ggml_leaky_relu(context, linear(context, hidden,
+        hidden = named_leaky_relu(context, linear(context, hidden,
             weight(runtime, stem + "weight", reason), weight(runtime, stem + "bias", reason)),
             0.01F, false);
     }
@@ -56,7 +180,26 @@ ggml_tensor * leaky_mlp(ggml_context * context, const neural_runtime & runtime,
 
 ggml_tensor * layer_norm(ggml_context * context, ggml_tensor * input,
                          ggml_tensor * scale, ggml_tensor * bias) {
-    return ggml_add(context, ggml_mul(context, ggml_norm(context, input, 1.0e-5F), scale), bias);
+    return label_output(precision_norm(context,input,scale,bias),bias);
+}
+
+ggml_tensor * attention_values(ggml_context * context, ggml_tensor * values,
+                              ggml_tensor * probabilities, const std::string & model_name) {
+    // The pinned SOMA ONNX root-token attention retains all 25 key slots.
+    // Zero masked keys still determine the boundaries of aligned reductions.
+    if(neural_half_arithmetic && neural_aligned_matmul_trial &&
+       model_name=="_root_token_transformer_model") {
+        const auto padding=static_cast<int>(25-values->ne[0]);
+        GGML_ASSERT(padding>=0);
+        if(padding) {
+            values=ggml_pad(context,values,padding,0,0,0);
+            probabilities=ggml_pad(context,probabilities,padding,0,0,0);
+        }
+        // Captured root attention reduces the full block before its remainder.
+        return half_round(context,soma_aligned_product(context,half_round(context,values),
+            half_round(context,probabilities),false,0,false));
+    }
+    return precision_matmul(context,values,probabilities);
 }
 
 ggml_tensor * transformer(ggml_context * context, const neural_runtime & runtime,
@@ -79,27 +222,30 @@ ggml_tensor * transformer(ggml_context * context, const neural_runtime & runtime
             ggml_cont_3d(context, q_values, head_width, heads, sequence), 0, 2, 1, 3);
         auto * key = ggml_permute(context,
             ggml_cont_3d(context, k_values, head_width, heads, sequence), 0, 2, 1, 3);
-        auto * scores = ggml_soft_max(context, ggml_scale(context,
-            ggml_mul_mat(context, key, query), 1.0F / std::sqrt(static_cast<float>(head_width))));
+        auto * score_product = precision_scores(context,ggml_cont(context,key),ggml_cont(context,query),static_cast<float>(head_width));
+        ggml_set_name(score_product,(prefix+"self_attn.score_product").c_str());
+        auto * scores = precision_soft_max(context,score_product);
+        ggml_set_name(scores,(prefix+"self_attn.probabilities").c_str());
         auto * value_transposed = ggml_cont_3d(context,
             ggml_permute(context,
                 ggml_cont_3d(context, v_values, head_width, heads, sequence), 1, 2, 0, 3),
             sequence, head_width, heads);
-        auto * attended = ggml_mul_mat(context, value_transposed, scores);
+        auto * attended = attention_values(context,value_transposed,scores,model_name);
         auto * merged = ggml_cont_2d(context, ggml_permute(context, attended, 0, 2, 1, 3),
                                     embedding, sequence);
+        ggml_set_name(merged,(prefix+"self_attn.merged_values").c_str());
         auto * attention = linear(context, merged,
             weight(runtime, prefix + "self_attn.out_proj.weight", reason),
             weight(runtime, prefix + "self_attn.out_proj.bias", reason));
-        hidden = layer_norm(context, ggml_add(context, hidden, attention),
+        hidden = layer_norm(context, precision_add(context, hidden, attention),
             weight(runtime, prefix + "norm1.weight", reason),
             weight(runtime, prefix + "norm1.bias", reason));
-        auto * feed = ggml_relu(context, linear(context, hidden,
+        auto * feed = named_relu(context, linear(context, hidden,
             weight(runtime, prefix + "linear1.weight", reason),
             weight(runtime, prefix + "linear1.bias", reason)));
         feed = linear(context, feed, weight(runtime, prefix + "linear2.weight", reason),
                       weight(runtime, prefix + "linear2.bias", reason));
-        hidden = layer_norm(context, ggml_add(context, hidden, feed),
+        hidden = layer_norm(context, precision_add(context, hidden, feed),
             weight(runtime, prefix + "norm2.weight", reason),
             weight(runtime, prefix + "norm2.bias", reason));
     }
@@ -108,13 +254,21 @@ ggml_tensor * transformer(ggml_context * context, const neural_runtime & runtime
 
 ggml_tensor * conv(ggml_context * context, ggml_tensor * input,
                    ggml_tensor * kernel, ggml_tensor * bias, int padding, int dilation) {
+    kernel=half_round(context,kernel);input=half_round(context,input);
     auto * columns = ggml_im2col(context, kernel, input, 1, 0, padding, 0,
                                 dilation, 0, false, GGML_TYPE_F32);
-    auto * output = ggml_mul_mat(context,
-        ggml_reshape_2d(context, columns, columns->ne[0], columns->ne[2] * columns->ne[1]),
-        ggml_reshape_2d(context, kernel, kernel->ne[0] * kernel->ne[1], kernel->ne[2]));
+    auto * left=ggml_reshape_2d(context,columns,columns->ne[0],columns->ne[2]*columns->ne[1]);
+    auto * right=ggml_reshape_2d(context,kernel,kernel->ne[0]*kernel->ne[1],kernel->ne[2]);
+    const bool profiled=neural_half_arithmetic && (neural_aligned_matmul_trial || neural_backend_root_conv_trial) &&
+        std::string(ggml_get_name(bias)).starts_with("_conv_output.") && kernel->ne[1]==512 &&
+        (kernel->ne[0]==3 || (kernel->ne[0]==1 && kernel->ne[2]==512));
+    auto * output=profiled?(neural_backend_root_conv_trial?precision_backend_conv(context,left,right,kernel->ne[0],kernel->ne[1],dilation):
+        soma_profiled_conv_product(context,left,right,kernel->ne[0],kernel->ne[1],dilation)):
+        precision_product(context,left,right);
     output = ggml_reshape_3d(context, output, columns->ne[1], kernel->ne[2], columns->ne[2]);
-    return ggml_add(context, output, ggml_reshape_2d(context, bias, 1, bias->ne[0]));
+    // The pinned CUDA reference stores the half convolution before its bias
+    // addition. Preserve that rounding boundary rather than fusing the bias.
+    return label_output(precision_convolution_bias(context,output,ggml_reshape_2d(context,bias,1,bias->ne[0])),bias);
 }
 
 ggml_tensor * residuals(ggml_context * context, const neural_runtime & runtime,
@@ -124,13 +278,18 @@ ggml_tensor * residuals(ggml_context * context, const neural_runtime & runtime,
     for (unsigned block = 0; block < dilations.size(); ++block) {
         const auto prefix = "_conv_output.model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".";
-        auto * branch = conv(context, ggml_relu(context, hidden),
+        auto * activation = named_relu(context, named_view(context,hidden,prefix+"norm1"));
+        ggml_set_name(activation,(prefix+"activation1").c_str());
+        auto * branch = conv(context, activation,
             weight(runtime, prefix + "conv1.weight", reason),
             weight(runtime, prefix + "conv1.bias", reason), dilations[block], dilations[block]);
-        branch = conv(context, ggml_relu(context, branch),
+        auto * activation2=named_relu(context,named_view(context,branch,prefix+"norm2"));
+        ggml_set_name(activation2,(prefix+"activation2").c_str());
+        branch = conv(context, activation2,
             weight(runtime, prefix + "conv2.weight", reason),
             weight(runtime, prefix + "conv2.bias", reason), 0, 1);
-        hidden = ggml_add(context, hidden, branch);
+        hidden = precision_add(context, hidden, branch);
+        ggml_set_name(hidden, prefix.substr(0,prefix.size()-1).c_str());
     }
     return hidden;
 }
@@ -145,23 +304,22 @@ ggml_tensor * root_decoder(ggml_context * context, const neural_runtime & runtim
                            ggml_tensor * target, ggml_tensor * target_mask,
                            std::uint32_t positions, std::string & reason) {
     const auto frames = positions * 4U;
-    auto * hidden = ggml_relu(context, conv(context, tokens,
+    auto * hidden = named_relu(context, conv(context, tokens,
         weight(runtime, "_conv_output.model.0.weight", reason),
         weight(runtime, "_conv_output.model.0.bias", reason), 1, 1));
     for (unsigned stage_index = 0; stage_index < 2U; ++stage_index) {
         const unsigned stage = stage_index + 2U;
         const auto group = 1U << (2U - stage_index);
         const auto stage_positions = positions * (1U << stage_index);
-        auto * target_emb = ggml_relu(context, linear(context, target,
+        auto * target_emb = named_relu(context, linear(context, target,
             weight(runtime, "_conv_output.target_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "_conv_output.target_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason)));
         auto * hidden_frames = transpose_contiguous(context, hidden, 512, stage_positions);
         hidden_frames = ggml_reshape_2d(context, hidden_frames, 512 / group, frames);
-        hidden_frames = ggml_add(context, hidden_frames,
-            ggml_mul(context, ggml_sub(context, target_emb, hidden_frames), target_mask));
+        hidden_frames = precision_blend(context,hidden_frames,target_emb,target_mask);
         hidden_frames = ggml_reshape_2d(context, hidden_frames, 512, stage_positions);
         auto * external_grouped = ggml_reshape_2d(context, external, 512 * group, stage_positions);
-        auto * fused = ggml_relu(context, linear(context,
+        auto * fused = named_relu(context, linear(context,
             ggml_concat(context, hidden_frames, external_grouped, 0),
             weight(runtime, "_conv_output.external_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "_conv_output.external_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason)));
@@ -169,11 +327,12 @@ ggml_tensor * root_decoder(ggml_context * context, const neural_runtime & runtim
         hidden = residuals(context, runtime, hidden, stage, reason);
         hidden = ggml_interpolate(context, hidden, hidden->ne[0] * 2, hidden->ne[1],
                                   hidden->ne[2], hidden->ne[3], GGML_SCALE_MODE_NEAREST);
+        ggml_set_name(hidden,("_conv_output.model."+std::to_string(stage)+".1").c_str());
         hidden = conv(context, hidden,
             weight(runtime, "_conv_output.model." + std::to_string(stage) + ".2.weight", reason),
             weight(runtime, "_conv_output.model." + std::to_string(stage) + ".2.bias", reason), 1, 1);
     }
-    hidden = ggml_relu(context, conv(context, hidden,
+    hidden = named_relu(context, conv(context, hidden,
         weight(runtime, "_conv_output.model.4.weight", reason),
         weight(runtime, "_conv_output.model.4.bias", reason), 1, 1));
     hidden = conv(context, hidden, weight(runtime, "_conv_output.model.6.weight", reason),
@@ -222,30 +381,32 @@ ggml_tensor * transformer_batch(ggml_context * context, const neural_runtime & r
                 ggml_cont_3d(context, q_values, head_width, heads, sequence), 0, 2, 1, 3);
             auto * key = ggml_permute(context,
                 ggml_cont_3d(context, k_values, head_width, heads, sequence), 0, 2, 1, 3);
-            auto * scores = ggml_soft_max(context, ggml_scale(context,
-                ggml_mul_mat(context, key, query),
-                1.0F / std::sqrt(static_cast<float>(head_width))));
+            auto * score_product = precision_scores(context,ggml_cont(context,key),ggml_cont(context,query),static_cast<float>(head_width));
+            ggml_set_name(score_product,(prefix+"self_attn.score_product").c_str());
+            auto * scores = precision_soft_max(context,score_product);
+            ggml_set_name(scores,(prefix+"self_attn.probabilities").c_str());
             auto * value_transposed = ggml_cont_3d(context,
                 ggml_permute(context,
                     ggml_cont_3d(context, v_values, head_width, heads, sequence), 1, 2, 0, 3),
                 sequence, head_width, heads);
-            auto * attended = ggml_mul_mat(context, value_transposed, scores);
+            auto * attended = attention_values(context,value_transposed,scores,model_name);
             merged_batches.push_back(ggml_cont_2d(context,
                 ggml_permute(context, attended, 0, 2, 1, 3), embedding, sequence));
         }
         auto * merged = concat_all(context, merged_batches, 1);
+        ggml_set_name(merged,(prefix+"self_attn.merged_values").c_str());
         auto * attention = linear(context, merged,
             weight(runtime, prefix + "self_attn.out_proj.weight", reason),
             weight(runtime, prefix + "self_attn.out_proj.bias", reason));
-        hidden = layer_norm(context, ggml_add(context, hidden, attention),
+        hidden = layer_norm(context, precision_add(context, hidden, attention),
             weight(runtime, prefix + "norm1.weight", reason),
             weight(runtime, prefix + "norm1.bias", reason));
-        auto * feed = ggml_relu(context, linear(context, hidden,
+        auto * feed = named_relu(context, linear(context, hidden,
             weight(runtime, prefix + "linear1.weight", reason),
             weight(runtime, prefix + "linear1.bias", reason)));
         feed = linear(context, feed, weight(runtime, prefix + "linear2.weight", reason),
                       weight(runtime, prefix + "linear2.bias", reason));
-        hidden = layer_norm(context, ggml_add(context, hidden, feed),
+        hidden = layer_norm(context, precision_add(context, hidden, feed),
             weight(runtime, prefix + "norm2.weight", reason),
             weight(runtime, prefix + "norm2.bias", reason));
     }
@@ -281,14 +442,15 @@ ggml_tensor * residuals_batch(ggml_context * context, const neural_runtime & run
     for (unsigned block = 0; block < dilations.size(); ++block) {
         const auto prefix = "_conv_output.model." + std::to_string(stage) + ".0.model." +
                             std::to_string(block) + ".";
-        auto * branch = conv_batch_independent(context, ggml_relu(context, hidden),
+        auto * branch = conv_batch_independent(context, named_relu(context, hidden),
             weight(runtime, prefix + "conv1.weight", reason),
             weight(runtime, prefix + "conv1.bias", reason), dilations[block], dilations[block],
             batch_size);
-        branch = conv_batch_independent(context, ggml_relu(context, branch),
+        branch = conv_batch_independent(context, named_relu(context, branch),
             weight(runtime, prefix + "conv2.weight", reason),
             weight(runtime, prefix + "conv2.bias", reason), 0, 1, batch_size);
-        hidden = ggml_add(context, hidden, branch);
+        hidden = precision_add(context, hidden, branch);
+        ggml_set_name(hidden, prefix.substr(0,prefix.size()-1).c_str());
     }
     return hidden;
 }
@@ -299,25 +461,24 @@ ggml_tensor * root_decoder_batch(ggml_context * context, const neural_runtime & 
                                  std::uint32_t positions, std::uint32_t batch_size,
                                  std::string & reason) {
     const auto frames = positions * 4U;
-    auto * hidden = ggml_relu(context, conv_batch_independent(context, tokens,
+    auto * hidden = named_relu(context, conv_batch_independent(context, tokens,
         weight(runtime, "_conv_output.model.0.weight", reason),
         weight(runtime, "_conv_output.model.0.bias", reason), 1, 1, batch_size));
     for (unsigned stage_index = 0; stage_index < 2U; ++stage_index) {
         const unsigned stage = stage_index + 2U;
         const auto group = 1U << (2U - stage_index);
         const auto stage_positions = positions * (1U << stage_index);
-        auto * target_emb = ggml_relu(context, linear(context, target,
+        auto * target_emb = named_relu(context, linear(context, target,
             weight(runtime, "_conv_output.target_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "_conv_output.target_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason)));
         auto * hidden_frames = transpose_contiguous_batch(
             context, hidden, 512, stage_positions, batch_size);
         hidden_frames = ggml_reshape_3d(context, hidden_frames, 512 / group, frames, batch_size);
-        hidden_frames = ggml_add(context, hidden_frames,
-            ggml_mul(context, ggml_sub(context, target_emb, hidden_frames), target_mask));
+        hidden_frames = precision_blend(context,hidden_frames,target_emb,target_mask);
         hidden_frames = ggml_reshape_3d(context, hidden_frames, 512, stage_positions, batch_size);
         auto * external_grouped = ggml_reshape_3d(
             context, external, 512 * group, stage_positions, batch_size);
-        auto * fused = ggml_relu(context, linear(context,
+        auto * fused = named_relu(context, linear(context,
             ggml_concat(context, hidden_frames, external_grouped, 0),
             weight(runtime, "_conv_output.external_cond_blocks." + std::to_string(stage_index * 2U) + ".weight", reason),
             weight(runtime, "_conv_output.external_cond_blocks." + std::to_string(stage_index * 2U) + ".bias", reason)));
@@ -326,12 +487,13 @@ ggml_tensor * root_decoder_batch(ggml_context * context, const neural_runtime & 
         hidden = residuals_batch(context, runtime, hidden, stage, batch_size, reason);
         hidden = ggml_interpolate(context, hidden, hidden->ne[0] * 2, hidden->ne[1],
                                   hidden->ne[2], hidden->ne[3], GGML_SCALE_MODE_NEAREST);
+        ggml_set_name(hidden,("_conv_output.model."+std::to_string(stage)+".1").c_str());
         hidden = conv_batch_independent(context, hidden,
             weight(runtime, "_conv_output.model." + std::to_string(stage) + ".2.weight", reason),
             weight(runtime, "_conv_output.model." + std::to_string(stage) + ".2.bias", reason),
             1, 1, batch_size);
     }
-    hidden = ggml_relu(context, conv_batch_independent(context, hidden,
+    hidden = named_relu(context, conv_batch_independent(context, hidden,
         weight(runtime, "_conv_output.model.4.weight", reason),
         weight(runtime, "_conv_output.model.4.bias", reason), 1, 1, batch_size));
     hidden = conv_batch_independent(context, hidden,
@@ -363,12 +525,14 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     reason = "this build has no GGML support";
     return MB_BACKEND_UNAVAILABLE;
 #else
+    root_layout layout{};
+    if (!get_root_layout(runtime, layout, reason)) return MB_INCOMPATIBLE_MODEL;
     constexpr std::uint32_t boundary_frames = 8U;
     if (requested_tokens < 6U || requested_tokens > 16U ||
         (duration_input_tokens != 18U &&
          (duration_input_tokens < 6U || duration_input_tokens > 16U)) ||
         global_root_values.size() != 40U ||
-        local_root_values.size() != 32U || poses.size() != 2432U ||
+        local_root_values.size() != 32U || poses.size() != (8U * layout.pose_width) ||
         has_global_root_values.size() != boundary_frames ||
         has_local_root_values.size() != boundary_frames || has_poses.size() != boundary_frames) {
         reason = "root planner input shape mismatch";
@@ -379,7 +543,7 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     if (!context) { reason = "cannot allocate root graph metadata"; return MB_OUT_OF_MEMORY; }
     auto * global_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 5, boundary_frames);
     auto * local_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 4, boundary_frames);
-    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 304, boundary_frames);
+    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, layout.pose_width, boundary_frames);
     auto * global_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1, boundary_frames);
     auto * local_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1, boundary_frames);
     auto * pose_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1, boundary_frames);
@@ -393,8 +557,7 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
 
     auto blend = [&](ggml_tensor * projected, const char * absent_name, ggml_tensor * mask) {
         auto * absent = weight(runtime, absent_name, reason);
-        return ggml_add(context.get(),
-            ggml_mul(context.get(), ggml_sub(context.get(), projected, absent), mask), absent);
+        return precision_blend(context.get(),absent,projected,mask);
     };
     auto * pose_emb = blend(linear(context.get(), pose_input,
         weight(runtime, "_proj_local_pose.weight", reason), weight(runtime, "_proj_local_pose.bias", reason)),
@@ -411,18 +574,18 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     auto * start_frame = leaky_mlp(context.get(), runtime, start, "_proj_start_input", reason);
     auto * end_frame = leaky_mlp(context.get(), runtime, end, "_proj_end_input", reason);
     auto * frame_emb = ggml_concat(context.get(), start_frame, end_frame, 1);
-    auto * positioned = ggml_add(context.get(), frame_emb, weight(runtime, "_input_position_emb.weight", reason));
-    auto * duration_emb = ggml_get_rows(context.get(),
+    auto * positioned = precision_add(context.get(), frame_emb, weight(runtime, "_input_position_emb.weight", reason));
+    auto * duration_emb = named_rows(context.get(),
         weight(runtime, "_proj_input_num_tokens.weight", reason), duration_input);
     auto * first_input = ggml_concat(context.get(), duration_emb, positioned, 1);
     auto * first_output = transformer(context.get(), runtime, first_input,
-        "_shared_transformer_model", 3, 9, reason);
+        "_shared_transformer_model", layout.shared_layers, 9, reason);
     auto * first_token = ggml_view_2d(context.get(), first_output, 512, 1, first_output->nb[1], 0);
     auto * duration_logits = linear(context.get(), first_token,
         weight(runtime, "_proj_num_token_output_logit.weight", reason),
         weight(runtime, "_proj_num_token_output_logit.bias", reason));
 
-    auto * middle_emb = ggml_get_rows(context.get(), weight(runtime, "_middle_token_emb.weight", reason),
+    auto * middle_emb = named_rows(context.get(), weight(runtime, "_middle_token_emb.weight", reason),
                                       planned_duration_input);
     auto * positions_all = ggml_reshape_2d(context.get(), weight(runtime, "_position_emb.embed", reason), 512, 16);
     auto * positions_view = ggml_view_2d(context.get(), positions_all, 512, requested_tokens,
@@ -430,16 +593,15 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     auto * second_input = ggml_concat(context.get(), middle_emb, positioned, 1);
     second_input = ggml_concat(context.get(), second_input, positions_view, 1);
     auto * second_output = transformer(context.get(), runtime, second_input,
-        "_root_token_transformer_model", 3, 9U + requested_tokens, reason);
+        "_root_token_transformer_model", layout.token_layers, 9U + requested_tokens, reason);
     auto * root_tokens = ggml_view_2d(context.get(), second_output, 512, requested_tokens,
                                      second_output->nb[1], 9U * second_output->nb[1]);
     auto * decoder_tokens = transpose_contiguous(context.get(), root_tokens, requested_tokens, 512);
 
-    auto * has_frame = ggml_clamp(context.get(), ggml_add(context.get(),
-        ggml_add(context.get(), global_mask, local_mask), pose_mask), 0.0F, 1.0F);
+    auto * has_frame = ggml_clamp(context.get(), precision_add(context.get(),
+        precision_add(context.get(), global_mask, local_mask), pose_mask), 0.0F, 1.0F);
     auto * absent_frame = weight(runtime, "_conv_no_frame_emb", reason);
-    auto * masked_frames = ggml_add(context.get(),
-        ggml_mul(context.get(), ggml_sub(context.get(), frame_emb, absent_frame), has_frame), absent_frame);
+    auto * masked_frames = precision_blend(context.get(),absent_frame,frame_emb,has_frame);
     auto * first_frames = ggml_view_2d(context.get(), masked_frames, 512, 4, masked_frames->nb[1], 0);
     auto * last_frames = ggml_view_2d(context.get(), masked_frames, 512, 4, masked_frames->nb[1],
                                      4U * masked_frames->nb[1]);
@@ -450,7 +612,7 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     auto * root_values = root_decoder(context.get(), runtime, decoder_tokens, dense_frame,
                                      dense_target, dense_target_mask, requested_tokens, reason);
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
-    auto * graph = ggml_new_graph_custom(context.get(), 4096, false);
+    auto * graph = ggml_new_graph_custom(context.get(), root_graph_capacity(context.get()), false);
     ggml_build_forward_expand(graph, duration_logits);
     ggml_build_forward_expand(graph, root_values);
     buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(context.get(), neural_backend(runtime)));
@@ -480,7 +642,7 @@ mb_status run_root_planner_impl(const neural_runtime & runtime,
     ggml_backend_tensor_set(duration_input, &duration_index, 0, sizeof(duration_index));
     ggml_backend_tensor_set(planned_duration_input, &planned_duration_index, 0,
                             sizeof(planned_duration_index));
-    const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
+    const auto status = neural_graph_compute(runtime, graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("root graph failed: ") + ggml_status_to_string(status);
         return MB_COMPUTE_FAILED;
@@ -515,11 +677,13 @@ mb_status run_root_duration_probe_batch(
     reason = "this build has no GGML support";
     return MB_BACKEND_UNAVAILABLE;
 #else
+    root_layout layout{};
+    if (!get_root_layout(runtime, layout, reason)) return MB_INCOMPATIBLE_MODEL;
     constexpr std::uint32_t boundary_frames = 8U;
     if (batch_size == 0U || batch_size > 64U ||
         global_root_values.size() != static_cast<std::size_t>(batch_size) * 40U ||
         local_root_values.size() != static_cast<std::size_t>(batch_size) * 32U ||
-        poses.size() != static_cast<std::size_t>(batch_size) * 2432U ||
+        poses.size() != static_cast<std::size_t>(batch_size) * (8U * layout.pose_width) ||
         has_global_root_values.size() != static_cast<std::size_t>(batch_size) * boundary_frames ||
         has_local_root_values.size() != static_cast<std::size_t>(batch_size) * boundary_frames ||
         has_poses.size() != static_cast<std::size_t>(batch_size) * boundary_frames) {
@@ -532,7 +696,7 @@ mb_status run_root_duration_probe_batch(
                                              boundary_frames * batch_size);
     auto * local_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 4,
                                             boundary_frames * batch_size);
-    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 304,
+    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, layout.pose_width,
                                            boundary_frames * batch_size);
     auto * global_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1,
                                             boundary_frames * batch_size);
@@ -546,8 +710,7 @@ mb_status run_root_duration_probe_batch(
         ggml_set_input(tensor);
     auto blend = [&](ggml_tensor * projected, const char * absent_name, ggml_tensor * mask) {
         auto * absent = weight(runtime, absent_name, reason);
-        return ggml_add(context.get(),
-            ggml_mul(context.get(), ggml_sub(context.get(), projected, absent), mask), absent);
+        return precision_blend(context.get(),absent,projected,mask);
     };
     auto * pose_emb = blend(linear(context.get(), pose_input,
         weight(runtime, "_proj_local_pose.weight", reason), weight(runtime, "_proj_local_pose.bias", reason)),
@@ -578,9 +741,9 @@ mb_status run_root_duration_probe_batch(
     auto * frame_emb = concat_all(context.get(), frame_batches, 1);
     auto * position_shape = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 512,
                                                boundary_frames * batch_size);
-    auto * positioned = ggml_add(context.get(), frame_emb,
+    auto * positioned = precision_add(context.get(), frame_emb,
         ggml_repeat(context.get(), weight(runtime, "_input_position_emb.weight", reason), position_shape));
-    auto * duration_emb = ggml_get_rows(context.get(),
+    auto * duration_emb = named_rows(context.get(),
         weight(runtime, "_proj_input_num_tokens.weight", reason), duration_input);
     std::vector<ggml_tensor *> first_batches;
     first_batches.reserve(batch_size);
@@ -591,7 +754,7 @@ mb_status run_root_duration_probe_batch(
                           boundary_frames, batch), 1));
     constexpr std::uint32_t first_sequence = 9U;
     auto * first_output = transformer_batch(context.get(), runtime,
-        concat_all(context.get(), first_batches, 1), "_shared_transformer_model", 3,
+        concat_all(context.get(), first_batches, 1), "_shared_transformer_model", layout.shared_layers,
         first_sequence, batch_size, reason);
     std::vector<ggml_tensor *> first_tokens;
     first_tokens.reserve(batch_size);
@@ -602,7 +765,7 @@ mb_status run_root_duration_probe_batch(
         weight(runtime, "_proj_num_token_output_logit.weight", reason),
         weight(runtime, "_proj_num_token_output_logit.bias", reason));
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
-    auto * graph = ggml_new_graph_custom(context.get(), 4096U, false);
+    auto * graph = ggml_new_graph_custom(context.get(), root_graph_capacity(context.get()), false);
     ggml_build_forward_expand(graph, duration_logits);
     buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(context.get(), neural_backend(runtime)));
     if (!buffer) { reason = "cannot allocate root duration compute buffer"; return MB_OUT_OF_MEMORY; }
@@ -617,7 +780,7 @@ mb_status run_root_duration_probe_batch(
     ggml_backend_tensor_set(local_mask, local_mask_f.data(), 0, ggml_nbytes(local_mask));
     ggml_backend_tensor_set(pose_mask, pose_mask_f.data(), 0, ggml_nbytes(pose_mask));
     ggml_backend_tensor_set(duration_input, duration_indices.data(), 0, ggml_nbytes(duration_input));
-    const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
+    const auto status = neural_graph_compute(runtime, graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("root duration graph failed: ") + ggml_status_to_string(status);
         return MB_COMPUTE_FAILED;
@@ -698,12 +861,14 @@ mb_status run_root_planner_auto_probe_batch(
     reason = "this build has no GGML support";
     return MB_BACKEND_UNAVAILABLE;
 #else
+    root_layout layout{};
+    if (!get_root_layout(runtime, layout, reason)) return MB_INCOMPATIBLE_MODEL;
     constexpr std::uint32_t boundary_frames = 8U;
     if (batch_size == 0U || batch_size > 64U ||
         candidate_tokens < 6U || candidate_tokens > 16U ||
         global_root_values.size() != static_cast<std::size_t>(batch_size) * 40U ||
         local_root_values.size() != static_cast<std::size_t>(batch_size) * 32U ||
-        poses.size() != static_cast<std::size_t>(batch_size) * 2432U ||
+        poses.size() != static_cast<std::size_t>(batch_size) * (8U * layout.pose_width) ||
         has_global_root_values.size() != static_cast<std::size_t>(batch_size) * boundary_frames ||
         has_local_root_values.size() != static_cast<std::size_t>(batch_size) * boundary_frames ||
         has_poses.size() != static_cast<std::size_t>(batch_size) * boundary_frames) {
@@ -717,7 +882,7 @@ mb_status run_root_planner_auto_probe_batch(
                                              boundary_frames * batch_size);
     auto * local_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 4,
                                             boundary_frames * batch_size);
-    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 304,
+    auto * pose_input = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, layout.pose_width,
                                            boundary_frames * batch_size);
     auto * global_mask = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 1,
                                             boundary_frames * batch_size);
@@ -736,8 +901,7 @@ mb_status run_root_planner_auto_probe_batch(
 
     auto blend = [&](ggml_tensor * projected, const char * absent_name, ggml_tensor * mask) {
         auto * absent = weight(runtime, absent_name, reason);
-        return ggml_add(context.get(),
-            ggml_mul(context.get(), ggml_sub(context.get(), projected, absent), mask), absent);
+        return precision_blend(context.get(),absent,projected,mask);
     };
     auto * pose_emb = blend(linear(context.get(), pose_input,
         weight(runtime, "_proj_local_pose.weight", reason), weight(runtime, "_proj_local_pose.bias", reason)),
@@ -769,9 +933,9 @@ mb_status run_root_planner_auto_probe_batch(
     auto * frame_emb = concat_all(context.get(), frame_batches, 1);
     auto * position_shape = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, 512,
                                                boundary_frames * batch_size);
-    auto * positioned = ggml_add(context.get(), frame_emb,
+    auto * positioned = precision_add(context.get(), frame_emb,
         ggml_repeat(context.get(), weight(runtime, "_input_position_emb.weight", reason), position_shape));
-    auto * duration_emb = ggml_get_rows(context.get(),
+    auto * duration_emb = named_rows(context.get(),
         weight(runtime, "_proj_input_num_tokens.weight", reason), duration_input);
     std::vector<ggml_tensor *> first_batches;
     first_batches.reserve(batch_size);
@@ -783,7 +947,7 @@ mb_status run_root_planner_auto_probe_batch(
     }
     constexpr std::uint32_t first_sequence = 9U;
     auto * first_output = transformer_batch(context.get(), runtime,
-        concat_all(context.get(), first_batches, 1), "_shared_transformer_model", 3,
+        concat_all(context.get(), first_batches, 1), "_shared_transformer_model", layout.shared_layers,
         first_sequence, batch_size, reason);
     std::vector<ggml_tensor *> first_tokens;
     first_tokens.reserve(batch_size);
@@ -794,7 +958,7 @@ mb_status run_root_planner_auto_probe_batch(
         weight(runtime, "_proj_num_token_output_logit.weight", reason),
         weight(runtime, "_proj_num_token_output_logit.bias", reason));
 
-    auto * middle_emb = ggml_get_rows(context.get(),
+    auto * middle_emb = named_rows(context.get(),
         weight(runtime, "_middle_token_emb.weight", reason), planned_duration_input);
     auto * positions_all = ggml_reshape_2d(context.get(),
         weight(runtime, "_position_emb.embed", reason), 512, 16);
@@ -811,7 +975,7 @@ mb_status run_root_planner_auto_probe_batch(
     }
     const auto second_sequence = 9U + candidate_tokens;
     auto * second_output = transformer_batch(context.get(), runtime,
-        concat_all(context.get(), second_batches, 1), "_root_token_transformer_model", 3,
+        concat_all(context.get(), second_batches, 1), "_root_token_transformer_model", layout.token_layers,
         second_sequence, batch_size, reason);
     std::vector<ggml_tensor *> decoder_token_batches;
     decoder_token_batches.reserve(batch_size);
@@ -825,11 +989,10 @@ mb_status run_root_planner_auto_probe_batch(
     }
     auto * decoder_tokens = concat_all(context.get(), decoder_token_batches, 2);
 
-    auto * has_frame = ggml_clamp(context.get(), ggml_add(context.get(),
-        ggml_add(context.get(), global_mask, local_mask), pose_mask), 0.0F, 1.0F);
+    auto * has_frame = ggml_clamp(context.get(), precision_add(context.get(),
+        precision_add(context.get(), global_mask, local_mask), pose_mask), 0.0F, 1.0F);
     auto * absent_frame = weight(runtime, "_conv_no_frame_emb", reason);
-    auto * masked_frames = ggml_add(context.get(),
-        ggml_mul(context.get(), ggml_sub(context.get(), frame_emb, absent_frame), has_frame), absent_frame);
+    auto * masked_frames = precision_blend(context.get(),absent_frame,frame_emb,has_frame);
     std::vector<ggml_tensor *> dense_frame_batches;
     dense_frame_batches.reserve(batch_size);
     for (std::uint32_t batch = 0; batch < batch_size; ++batch) {
@@ -847,7 +1010,7 @@ mb_status run_root_planner_auto_probe_batch(
     auto * root_values = root_decoder_batch(context.get(), runtime, decoder_tokens, dense_frame,
         dense_target, dense_target_mask, candidate_tokens, batch_size, reason);
     if (!reason.empty()) return MB_INCOMPATIBLE_MODEL;
-    auto * graph = ggml_new_graph_custom(context.get(), 8192, false);
+    auto * graph = ggml_new_graph_custom(context.get(), root_graph_capacity(context.get()), false);
     ggml_build_forward_expand(graph, duration_logits);
     ggml_build_forward_expand(graph, root_values);
     buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(context.get(), neural_backend(runtime)));
@@ -884,7 +1047,7 @@ mb_status run_root_planner_auto_probe_batch(
     ggml_backend_tensor_set(duration_input, duration_indices.data(), 0, ggml_nbytes(duration_input));
     ggml_backend_tensor_set(planned_duration_input, planned_duration_indices.data(), 0,
                             ggml_nbytes(planned_duration_input));
-    const auto status = ggml_backend_graph_compute(neural_backend(runtime), graph);
+    const auto status = neural_graph_compute(runtime, graph);
     if (status != GGML_STATUS_SUCCESS) {
         reason = std::string("batched root graph failed: ") + ggml_status_to_string(status);
         return MB_COMPUTE_FAILED;

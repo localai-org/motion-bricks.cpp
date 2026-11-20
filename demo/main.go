@@ -82,6 +82,7 @@ type replayServer struct {
 type comparisonPlan struct {
 	ExpectedFrames               uint32     `json:"expected_frames"`
 	ActualFrames                 uint32     `json:"actual_frames"`
+	AlignedFrames                *uint32    `json:"aligned_frames,omitempty"`
 	Movement                     [3]float32 `json:"movement"`
 	Facing                       [3]float32 `json:"facing"`
 	ExpectedJointPositions       []float32  `json:"expected_joint_positions"`
@@ -109,6 +110,7 @@ type sessionRequest struct {
 	Style string `json:"style"`
 }
 type planRequest struct {
+	Fast    bool       `json:"fast,omitempty"`
 	Session string     `json:"session"`
 	Style   string     `json:"style"`
 	Move    [2]float32 `json:"move"`
@@ -279,8 +281,9 @@ func loadComparisonServer(path string) (*comparisonServer, error) {
 	if err = decoder.Decode(&document); err != nil {
 		return nil, fmt.Errorf("decode comparison: %w", err)
 	}
-	if document.Format != "motionbricks-open-loop-report-v1" || document.FPS == 0 ||
-		document.FPS > 1000 || document.Joints == 0 || document.Joints > 64 ||
+	soma := document.Format == "motionbricks-soma-chain-view-v1"
+	if (document.Format != "motionbricks-open-loop-report-v1" && !soma) || document.FPS == 0 ||
+		document.FPS > 1000 || document.Joints == 0 || document.Joints > 256 ||
 		len(document.Plans) == 0 || len(document.Plans) > 10000 ||
 		len(document.Parents) != int(document.Joints) || len(document.Neutral) != int(document.Joints*3) {
 		return nil, errors.New("comparison metadata is unsupported")
@@ -294,7 +297,14 @@ func loadComparisonServer(path string) (*comparisonServer, error) {
 		}
 	}
 	for index, plan := range document.Plans {
-		if plan.ExpectedFrames < 24 || plan.ExpectedFrames > 64 || plan.ActualFrames < 24 || plan.ActualFrames > 64 ||
+		if plan.AlignedFrames != nil && (!soma || *plan.AlignedFrames > min(plan.ExpectedFrames, plan.ActualFrames)) {
+			return nil, fmt.Errorf("comparison plan %d aligned prefix is invalid", index)
+		}
+		minimum, maximum := uint32(24), uint32(64)
+		if soma {
+			minimum, maximum = 4, 100000
+		}
+		if plan.ExpectedFrames < minimum || plan.ExpectedFrames > maximum || plan.ActualFrames < minimum || plan.ActualFrames > maximum ||
 			len(plan.ExpectedJointPositions) != int(plan.ExpectedFrames*document.Joints*3) ||
 			len(plan.NativeJointPositions) != int(plan.ActualFrames*document.Joints*3) ||
 			len(plan.ExpectedTargetJointPositions) != int(4*document.Joints*3) ||
@@ -669,6 +679,8 @@ func (s *demoServer) finishKimodo(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	somaBundle := flag.String("soma-model", os.Getenv("MOTIONBRICKS_SOMA_MODEL"), "optional SOMA bundle alongside G1")
+	somaAssets := flag.String("soma-assets", os.Getenv("MOTIONBRICKS_SOMA_ASSETS"), "SOMA interactive skeleton and target styles JSON")
 	listen := flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
 	libraryPath := flag.String("library", os.Getenv("MOTIONBRICKS_LIB"), "path to libmotionbricks")
 	modelPath := flag.String("model", os.Getenv("MOTIONBRICKS_MODEL"), "model bundle directory")
@@ -741,9 +753,46 @@ func main() {
 		defer livePhysics.Close()
 	}
 	if nativeDemo != nil {
-		stream := newStreamHub(nativeDemo, livePhysics)
+		stream := newStreamHub(g1StreamPlanner{nativeDemo}, livePhysics)
 		defer stream.Close()
 		handler = stream.routes(handler)
+	}
+	if nativeDemo != nil {
+		models := []map[string]string{{"id": "g1", "name": "G1 robot"}}
+		if *somaBundle != "" {
+			device, err := parseDevice(*deviceName)
+			if err != nil {
+				log.Fatal(err)
+			}
+			soma, err := loadSOMAServer(*libraryPath, *somaBundle, *somaAssets, device)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer soma.model.Close()
+			somaStream := newStreamHub(somaStreamPlanner{soma}, nil)
+			defer somaStream.Close()
+			somaHandler := somaStream.routes(soma.routes(http.NotFoundHandler()))
+			g1Handler := handler
+			handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Query().Get("model") {
+				case "", "g1":
+					g1Handler.ServeHTTP(w, r)
+				case "soma":
+					if strings.HasPrefix(r.URL.Path, "/api/") {
+						somaHandler.ServeHTTP(w, r)
+					} else {
+						g1Handler.ServeHTTP(w, r)
+					}
+				default:
+					apiError(w, http.StatusBadRequest, errors.New("unknown model"))
+				}
+			})
+			models = append(models, map[string]string{"id": "soma", "name": "SOMA human"})
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, models) })
+		mux.Handle("/", handler)
+		handler = mux
 	}
 	var physicsErr error
 	handler, physicsErr = physicsRoutes(handler, *physicsPath)

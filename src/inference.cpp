@@ -10,12 +10,7 @@
 #include <type_traits>
 #include <vector>
 
-struct mb_inference_request {
-    motionbricks::detail::transition_constraints constraints;
-    std::array<std::array<bool,2>,3> initialized{};
-    uint64_t seed=0;
-    uint32_t argmax=0;
-};
+#include "inference_handles.hpp"
 namespace {
 using motionbricks::detail::guard;
 using motionbricks::detail::fail;
@@ -56,6 +51,7 @@ mb_status mb_inference_request_set_features(mb_inference_request * r,uint32_t f,
         auto dest=features(*r,f);
         if(dest.empty()||count!=dest.size())return fail(MB_INVALID_ARGUMENT,e,n,"feature field/count mismatch");
         if(!safe({data,dest.size()}))return fail(MB_INVALID_ARGUMENT,e,n,"features must be finite and within +/-1e4");
+        if(r->skeleton)return fail(MB_INVALID_ARGUMENT,e,n,"raw G1 features cannot be combined with a retargeting skeleton");
         std::copy_n(data,dest.size(),dest.begin());r->initialized[f]={true,true};return MB_OK;
     });
 }
@@ -77,6 +73,7 @@ mb_status mb_inference_request_set_mask(mb_inference_request * r,uint32_t f,cons
         if(!std::all_of(data,data+count,[](uint32_t v){return v<=1;}))return fail(MB_INVALID_ARGUMENT,e,n,"mask values must be 0 or 1");
         if(f==MB_INFERENCE_DURATIONS&&std::none_of(data,data+count,[](uint32_t v){return v!=0;}))return fail(MB_INVALID_ARGUMENT,e,n,"at least one duration must be enabled");
         if(f==MB_INFERENCE_GLOBAL_ROOT&&!data[0])return fail(MB_INVALID_ARGUMENT,e,n,"global root slot zero is required");
+        if(f!=MB_INFERENCE_DURATIONS)r->feature_masks_set=true;
         for(std::size_t index=0;index<dest.size();++index)
             dest[index]=static_cast<uint8_t>(data[index]);
         return MB_OK;
@@ -93,19 +90,21 @@ mb_status mb_inference_request_get_mask(const mb_inference_request * r,uint32_t 
     });
 }
 mb_status mb_inference_request_set_seed(mb_inference_request * r,uint64_t seed,char * e,uint64_t n) {
-    return guard(e,n,[&]() -> mb_status {if(!r)return fail(MB_INVALID_ARGUMENT,e,n,"request is null");r->seed=seed;return MB_OK;});
+    return guard(e,n,[&]() -> mb_status {if(!r)return fail(MB_INVALID_ARGUMENT,e,n,"request is null");r->seed=seed;r->sampling_set=true;return MB_OK;});
 }
 mb_status mb_inference_request_get_seed(const mb_inference_request * r,uint64_t * seed,char * e,uint64_t n) {
     return guard(e,n,[&]() -> mb_status {if(!r||!seed)return fail(MB_INVALID_ARGUMENT,e,n,"request or seed is null");*seed=r->seed;return MB_OK;});
 }
 mb_status mb_inference_request_set_sampling_argmax(mb_inference_request * r,uint32_t enabled,char * e,uint64_t n) {
-    return guard(e,n,[&]() -> mb_status {if(!r||enabled>1)return fail(MB_INVALID_ARGUMENT,e,n,"request is null or argmax is not 0/1");r->argmax=enabled;return MB_OK;});
+    return guard(e,n,[&]() -> mb_status {if(!r||enabled>1)return fail(MB_INVALID_ARGUMENT,e,n,"request is null or argmax is not 0/1");r->argmax=enabled;r->sampling_set=true;return MB_OK;});
 }
 mb_status mb_inference_request_get_sampling_argmax(const mb_inference_request * r,uint32_t * enabled,char * e,uint64_t n) {
     return guard(e,n,[&]() -> mb_status {if(!r||!enabled)return fail(MB_INVALID_ARGUMENT,e,n,"request or argmax output is null");*enabled=r->argmax;return MB_OK;});
 }
 mb_status mb_inference_request_set_boundary_poses(mb_inference_request * r,const mb_model * model,uint32_t boundary,const float * roots,uint64_t nr,const float * rotations,uint64_t nq,char * e,uint64_t n) {
     return guard(e,n,[&]() -> mb_status {
+        if(r&&r->skeleton)return fail(MB_INVALID_ARGUMENT,e,n,"G1 boundary poses cannot be combined with a retargeting skeleton");
+        if(model&&model->kind==MB_MODEL_SOMA)return fail(MB_INCOMPATIBLE_MODEL,e,n,"SOMA requires set_boundary_transforms with per-joint translations");
         if(!r||!model||!roots||!rotations||boundary>1||nr!=12||nq!=544)return fail(MB_INVALID_ARGUMENT,e,n,"boundary requires model, request, index 0/1, roots[4,3], rotations[4,34,4]");
         if(!safe({roots,12})||!safe({rotations,544}))return fail(MB_INVALID_ARGUMENT,e,n,"boundary values must be finite and within +/-1e4");
         for(size_t i=0;i<544;i+=4) {
@@ -136,6 +135,8 @@ mb_status mb_model_infer(const mb_model * model,const mb_inference_request * r,m
         if(!out)return fail(MB_INVALID_ARGUMENT,e,n,"output is null");
         *out=nullptr;
         if(!model||!r)return fail(MB_INVALID_ARGUMENT,e,n,"model or request is null");
+        if(model->kind==MB_MODEL_SOMA)return motionbricks::detail::infer_soma(model,r,out,e,n);
+        if(r->skeleton||!r->transforms[0].empty()||r->precision||r->heading!=0)return fail(MB_INCOMPATIBLE_MODEL,e,n,"G1 inference does not support retargeting transforms, non-FP32 precision or canonical heading overrides");
         for(const auto & halves:r->initialized)if(!halves[0]||!halves[1])return fail(MB_INVALID_ARGUMENT,e,n,"all feature fields or both boundaries must be supplied");
         const auto & g=r->constraints.global_root;
         for(size_t i=0;i<8;++i)if(r->constraints.has_global_root[i]) {
@@ -158,6 +159,17 @@ mb_status mb_model_infer_batch(const mb_model * model,
         if(count>64)return fail(MB_INVALID_ARGUMENT,e,n,"batch count must be in the range 1..64");
         for(uint64_t i=0;i<count;++i)outputs[i]=nullptr;
         if(!model||!requests||count==0)return fail(MB_INVALID_ARGUMENT,e,n,"model, requests, or batch count is invalid");
+        if(model->kind==MB_MODEL_SOMA) {
+            std::vector<std::unique_ptr<mb_motion>> owned;
+            for(uint64_t i=0;i<count;++i) {
+                mb_motion * result=nullptr;
+                auto status=mb_model_infer(model,requests[i],&result,e,n);
+                if(status!=MB_OK)return status;
+                owned.emplace_back(result);
+            }
+            for(uint64_t i=0;i<count;++i)outputs[i]=owned[i].release();
+            return MB_OK;
+        }
         std::vector<motionbricks::detail::transition_constraints> constraints;
         std::vector<uint64_t> seeds;
         std::vector<uint8_t> argmax;
@@ -165,6 +177,7 @@ mb_status mb_model_infer_batch(const mb_model * model,
         for(uint64_t request_index=0;request_index<count;++request_index) {
             const auto * r=requests[request_index];
             if(!r)return fail(MB_INVALID_ARGUMENT,e,n,"a batch request is null");
+            if(r->skeleton||r->precision||r->heading!=0)return fail(MB_INCOMPATIBLE_MODEL,e,n,"G1 batch request contains unsupported retargeting or precision settings");
             for(const auto & halves:r->initialized)
                 if(!halves[0]||!halves[1])return fail(MB_INVALID_ARGUMENT,e,n,"all feature fields or both boundaries must be supplied");
             const auto & g=r->constraints.global_root;

@@ -1,9 +1,9 @@
-# MuJoCo 3.12.0 runtime
+# MuJoCo 4.0.1 runtime
 
-The native SONIC controller now targets [MuJoCo 3.12.0](https://github.com/google-deepmind/mujoco/releases/tag/3.12.0),
-the latest stable release checked on 2026-09-07. The independent upstream Docker
+The native SONIC controller now targets [MuJoCo 4.0.1](https://github.com/google-deepmind/mujoco/releases/tag/4.0.1),
+the latest stable release checked on 2026-11-18. The independent upstream Docker
 environment remains on 3.3.5 so upgrading the runtime does not silently replace
-our reference. Both SDK versions are explicitly supported and tested; other
+our reference. The retained 3.12.0 runtime is also supported. Other
 versions require validation before extending the compile-time allowlist.
 
 ## Install and build
@@ -12,10 +12,10 @@ Follow the normal Linux build instructions first, then:
 
 ```sh
 bash scripts/download_mujoco.sh
-MUJOCO_SDK="$PWD/generated/sonic/mujoco-3.12.0"
+MUJOCO_SDK="$PWD/generated/sonic/mujoco-4.0.1"
 cmake --preset debug -DMOTIONBRICKS_ENABLE_PHYSICS=ON \
   -DMUJOCO_INCLUDE_DIR="$MUJOCO_SDK/include" \
-  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.3.12.0"
+  -DMUJOCO_LIBRARY="$MUJOCO_SDK/lib/libmujoco.so.4.0.1"
 cmake --build --preset debug
 (cd demo && CGO_ENABLED=0 go build -o ../build/debug/bin/motionbricks-demo .)
 ```
@@ -30,8 +30,8 @@ The pinned archive SHA-256 values are:
 
 | Platform | SHA-256 |
 |---|---|
-| Linux x86-64 | `a9367911e6d5eaeade17c2197304687421c1fc932cdf7bcd4cb8cfaf0374dcb2` |
-| Linux AArch64 | `08fd5627a2ef7d5a42580c40e014ab2c1a644f082010c584ca361a3ed8cad838` |
+| Linux x86-64 | `8df1308b2900a4ed6c18717ebbc9d66d53ab3fe7a4da860a7d5b21f94607299d` |
+| Linux AArch64 | `e16dc0ed24d31279bce674bd03b9f8ef75f209d1189befe67b7c3b366978a6b3` |
 
 Restart the demo after rebuilding: an already running process retains the old
 loaded library. Its status line and `/api/stream` expose the loaded version.
@@ -43,7 +43,33 @@ Never substitute one SDK library under another SDK's headers: `mjModel` and
 `mjData` layouts changed. Runtime/header equality is checked before model
 allocation or struct access.
 
-## API and performance changes
+## MuJoCo 4.0.1 validation (2026-11-18)
+
+The current Debug native library was rebuilt against the checksum-verified
+4.0.1 Linux x86-64 SDK. No public API changes were needed; the newer actuator
+addressing and sleeping code paths now cover 4.0.1 as well as 3.12.0.
+
+- All three native SONIC API/model/physics tests pass, including independent
+  torque replay, collision transforms, foot dimensions and hull winding.
+- Headless Chromium G1 streaming with Vulkan inference passes at both 0 and
+  100 ms injected delivery delay. Measured playback rates were 1.018x and
+  1.009x, with zero idle drift and respectively zero and one walking underruns.
+  Pause/resume, reconnect and reset checks also pass.
+- Recorded Vulkan walking (498 ticks) and stop/turn (598 ticks) both complete
+  without falling. The recordings identify the loaded engine as 4.0.1 and
+  include input hashes and policy/motor traces.
+- The ordinary demo Go regression suite passes.
+
+Artifacts are under `generated/sonic/mujoco-4.0.1-validation/`; browser
+screenshots/reports are under `generated/sonic/ggml/stream-qa/`. These checks
+validate the native integration and selected G1 workloads. The independent
+ONNX boundary comparison, sanitizer suite and Kimodo tracking checks described
+below were not rerun for 4.0.1; their historical results must not be attributed
+to this release. The Devroute interactive demo was subsequently redeployed from `build/debug`
+with SOMA Vulkan shaders and MuJoCo 4.0.1 enabled. The combined build passed
+the G1 physics streaming test and dual-model browser test before deployment.
+
+## Historical 3.12.0 API and performance changes
 
 - Use the new actuator count and scalar-control address APIs. The original G1
   model has 43 actuators and 43 scalar controls; its 29 controlled motors must
@@ -65,7 +91,7 @@ Motor gains, torque limits, materials, policy weights and the 50 Hz controller /
 200 Hz physics rates are unchanged. New PID/DC-motor capabilities are not
 silently substituted into the trained controller. See the [release changes](https://mujoco.readthedocs.io/en/3.12.0/changelog.html).
 
-## Measurements
+## Historical 3.12.0 measurements
 
 On the development Ryzen 9 7900, median of three alternating old/new CPU runs
 of the identical 498-tick recorded walk, four inference threads, Debug project
@@ -90,7 +116,7 @@ process/build, with identical `--model`, `--scene`, `--config`, `--motion` and
 `--device`; the recorder includes the loaded MuJoCo version. Do not compare
 timings from different clips or while compilation/QA is running.
 
-## Verification
+## Historical 3.12.0 verification
 
 - CPU and NVIDIA Vulkan SONIC parity pass on all 2,205 stored observations.
   Physics trajectories need not be bit-identical across engine releases;

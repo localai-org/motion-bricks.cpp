@@ -1,6 +1,469 @@
+if(MOTIONBRICKS_ENABLE_SOMA_CALIBRATED_TESTS AND NOT MOTIONBRICKS_ENABLE_GGML)
+    message(FATAL_ERROR "SOMA calibrated parity tests require MOTIONBRICKS_ENABLE_GGML")
+endif()
+
 add_executable(motionbricks-c-api-test c_api_test.c)
 target_link_libraries(motionbricks-c-api-test PRIVATE motionbricks::motionbricks)
+target_compile_definitions(motionbricks-c-api-test PRIVATE MOTIONBRICKS_TEST_HAVE_GGML=$<BOOL:${MOTIONBRICKS_ENABLE_GGML}>)
 add_test(NAME motionbricks-c-api COMMAND motionbricks-c-api-test)
+
+if(MOTIONBRICKS_ENABLE_GGML)
+    add_executable(motionbricks-soma-aligned-dot-test soma_aligned_dot_test.cpp)
+    target_include_directories(motionbricks-soma-aligned-dot-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_features(motionbricks-soma-aligned-dot-test PRIVATE cxx_std_20)
+    add_test(NAME motionbricks-soma-aligned-dot COMMAND motionbricks-soma-aligned-dot-test)
+    add_executable(motionbricks-soma-welford-test soma_welford_test.cpp)
+    target_include_directories(motionbricks-soma-welford-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_features(motionbricks-soma-welford-test PRIVATE cxx_std_20)
+    add_test(NAME motionbricks-soma-welford COMMAND motionbricks-soma-welford-test)
+    add_executable(motionbricks-soma-rsqrt-table-test soma_rsqrt_table_test.cpp)
+    target_include_directories(motionbricks-soma-rsqrt-table-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_features(motionbricks-soma-rsqrt-table-test PRIVATE cxx_std_20)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/rsqrt-mantissa-table/rsqrt-sm120-corrections.bin" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/rsqrt-scale-audit/pairs.bin")
+        add_test(NAME motionbricks-soma-rsqrt-table COMMAND motionbricks-soma-rsqrt-table-test
+            "${PROJECT_SOURCE_DIR}/generated/soma/rsqrt-mantissa-table/rsqrt-sm120-corrections.bin"
+            "${PROJECT_SOURCE_DIR}/generated/soma/rsqrt-scale-audit/pairs.bin")
+    endif()
+    add_executable(motionbricks-soma-backend-softmax-probe soma_backend_softmax_probe.cpp)
+    target_include_directories(motionbricks-soma-backend-softmax-probe PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-backend-softmax-probe PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-backend-softmax-probe PRIVATE motionbricks_static ggml)
+    add_executable(motionbricks-soma-softmax-test soma_softmax_test.cpp)
+    target_include_directories(motionbricks-soma-softmax-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_features(motionbricks-soma-softmax-test PRIVATE cxx_std_20)
+    target_link_libraries(motionbricks-soma-softmax-test PRIVATE ggml)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/exp2-fraction-table/exp2-sm120-corrections.bin" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-softmax-audit/softmax-reference.bin")
+        add_test(NAME motionbricks-soma-softmax COMMAND motionbricks-soma-softmax-test
+            "${PROJECT_SOURCE_DIR}/generated/soma/exp2-fraction-table/exp2-sm120-corrections.bin"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-softmax-audit/softmax-reference.bin")
+    endif()
+    add_executable(motionbricks-soma-mixed-pose-probe soma_mixed_pose_probe.cpp)
+    add_executable(motionbricks-soma-root-capacity-test soma_root_capacity_test.cpp)
+    target_include_directories(motionbricks-soma-root-capacity-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-root-capacity-test PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-root-capacity-test PRIVATE motionbricks_static ggml)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/root.gguf")
+        foreach(precision fp32 mixed-fp16)
+            add_test(NAME motionbricks-soma-root-capacity-${precision} COMMAND motionbricks-soma-root-capacity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf" 64 ${precision})
+            set_tests_properties(motionbricks-soma-root-capacity-${precision} PROPERTIES RUN_SERIAL TRUE LABELS "capacity")
+        endforeach()
+    endif()
+    add_executable(motionbricks-soma-mixed-feature-batch-probe soma_mixed_feature_batch_probe.cpp)
+    target_include_directories(motionbricks-soma-mixed-feature-batch-probe PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-mixed-feature-batch-probe PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-mixed-feature-batch-probe PRIVATE motionbricks_static ggml)
+    add_executable(motionbricks-soma-norm-probe soma_norm_probe.cpp)
+    add_executable(motionbricks-soma-matmul-probe soma_matmul_probe.cpp)
+    target_include_directories(motionbricks-soma-matmul-probe PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-matmul-probe PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-matmul-probe PRIVATE motionbricks_static ggml)
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            set(soma_projection_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-residue-audit/${motion}.gguf")
+            if(EXISTS "${soma_projection_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                add_test(NAME motionbricks-soma-vulkan-prefix-${motion} COMMAND motionbricks-soma-matmul-probe
+                    "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_projection_fixture}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-prefix-${motion}.json" vulkan backend-prefix-matrix)
+                set_tests_properties(motionbricks-soma-vulkan-prefix-${motion} PROPERTIES
+                    RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                    ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+            endif()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(mlp_end start end)
+                foreach(mlp_layer fc_layers.0 fc_layers.1 forward_projection)
+                    set(soma_mlp_case "${motion}-${mlp_end}-${mlp_layer}")
+                    set(soma_mlp_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-mlp-matrix-audit/${soma_mlp_case}.gguf")
+                    if(EXISTS "${soma_mlp_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                        add_test(NAME motionbricks-soma-vulkan-mlp-${soma_mlp_case} COMMAND motionbricks-soma-matmul-probe
+                            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_mlp_fixture}"
+                            "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-mlp-${soma_mlp_case}.json" vulkan backend-prefix-matrix)
+                        set_tests_properties(motionbricks-soma-vulkan-mlp-${soma_mlp_case} PROPERTIES
+                            RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                            ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                    endif()
+                endforeach()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer qkv linear1)
+                set(soma_nvjet3_case "${motion}-${layer}")
+                set(soma_nvjet3_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-nvjet3-audit/${soma_nvjet3_case}.gguf")
+                if(EXISTS "${soma_nvjet3_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-nvjet3-${soma_nvjet3_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_nvjet3_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-nvjet3-${soma_nvjet3_case}.json" vulkan backend-nvjet3)
+                    set_tests_properties(motionbricks-soma-vulkan-nvjet3-${soma_nvjet3_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer linear2 cond2)
+                set(soma_nvjet_split4_case "${motion}-${layer}")
+                set(soma_nvjet_split4_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-nvjet-split4-audit/${soma_nvjet_split4_case}.gguf")
+                if(EXISTS "${soma_nvjet_split4_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-nvjet-split4-${soma_nvjet_split4_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_nvjet_split4_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-nvjet-split4-${soma_nvjet_split4_case}.json" vulkan backend-nvjet-split4)
+                    set_tests_properties(motionbricks-soma-vulkan-nvjet-split4-${soma_nvjet_split4_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer RANGE 0 15)
+                set(soma_pose_scores_case "${motion}-layer${layer}")
+                set(soma_pose_scores_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-pose-scores-audit/${soma_pose_scores_case}.gguf")
+                if(EXISTS "${soma_pose_scores_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-pose-scores-${soma_pose_scores_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_pose_scores_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-pose-scores-${soma_pose_scores_case}.json" vulkan backend-nvjet-scores)
+                    set_tests_properties(motionbricks-soma-vulkan-pose-scores-${soma_pose_scores_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer root-first root-split root-spatial root-pointwise)
+                set(soma_root_conv_case "${motion}-${layer}")
+                set(soma_root_conv_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-conv-audit/${soma_root_conv_case}.gguf")
+                if(EXISTS "${soma_root_conv_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-conv-${soma_root_conv_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_root_conv_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-conv-${soma_root_conv_case}.json" vulkan backend-conv)
+                    set_tests_properties(motionbricks-soma-vulkan-conv-${soma_root_conv_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer decoder-first decoder-split decoder-spatial decoder-pointwise)
+                set(soma_decoder_conv_case "${motion}-${layer}")
+                set(soma_decoder_conv_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-decoder-conv-audit/${soma_decoder_conv_case}.gguf")
+                if(EXISTS "${soma_decoder_conv_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-decoder-conv-${soma_decoder_conv_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_decoder_conv_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-decoder-conv-${soma_decoder_conv_case}.json" vulkan backend-conv)
+                    set_tests_properties(motionbricks-soma-vulkan-decoder-conv-${soma_decoder_conv_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            set(soma_nvjet8_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-nvjet8-audit/${motion}-outproj.gguf")
+            if(EXISTS "${soma_nvjet8_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                add_test(NAME motionbricks-soma-vulkan-nvjet8-${motion} COMMAND motionbricks-soma-matmul-probe
+                    "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${soma_nvjet8_fixture}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-nvjet8-${motion}.json" vulkan backend-nvjet8-bias)
+                set_tests_properties(motionbricks-soma-vulkan-nvjet8-${motion} PROPERTIES
+                    RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                    ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+            endif()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(layer root-cond0 decoder-cond0 decoder-cond2)
+                set(conditioning_cases "${motion}-${layer}")
+                if(motion STREQUAL "walk" AND layer STREQUAL "root-cond0")
+                    list(APPEND conditioning_cases "walk-root-cond0-eight")
+                endif()
+                if(layer STREQUAL "root-cond0")
+                    set(conditioning_mode backend-split8-matrix)
+                else()
+                    set(conditioning_mode backend-prefix-matrix)
+                endif()
+                foreach(conditioning_case IN LISTS conditioning_cases)
+                    set(conditioning_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-conditioning-audit/${conditioning_case}.gguf")
+                    if(EXISTS "${conditioning_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                        add_test(NAME motionbricks-soma-vulkan-conditioning-${conditioning_case} COMMAND motionbricks-soma-matmul-probe
+                            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${conditioning_fixture}"
+                            "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-conditioning-${conditioning_case}.json" vulkan ${conditioning_mode})
+                        set_tests_properties(motionbricks-soma-vulkan-conditioning-${conditioning_case} PROPERTIES
+                            RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                            ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                    endif()
+                endforeach()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            set(target_cases pose-input pose-eight target0 target2)
+            if(motion STREQUAL "zombie")
+                list(APPEND target_cases step1-target2)
+            endif()
+            foreach(target_case IN LISTS target_cases)
+                set(target_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-target-audit/${motion}-${target_case}.gguf")
+                if(EXISTS "${target_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-target-${motion}-${target_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${target_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-target-${motion}-${target_case}.json" vulkan backend-prefix-matrix)
+                    set_tests_properties(motionbricks-soma-vulkan-target-${motion}-${target_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+        foreach(motion walk sit zombie)
+            foreach(pose_matrix_case qkv outproj linear1 linear2)
+                set(pose_matrix_fixture "${PROJECT_SOURCE_DIR}/generated/soma/vulkan-pose-matrix-audit/${motion}-${pose_matrix_case}-eight.gguf")
+                if(pose_matrix_case STREQUAL "outproj")
+                    set(pose_matrix_mode backend-prefix-bias)
+                else()
+                    set(pose_matrix_mode backend-prefix-matrix)
+                endif()
+                if(EXISTS "${pose_matrix_fixture}" AND EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+                    add_test(NAME motionbricks-soma-vulkan-pose-matrix-${motion}-${pose_matrix_case} COMMAND motionbricks-soma-matmul-probe
+                        "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${pose_matrix_fixture}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/soma-vulkan-pose-matrix-${motion}-${pose_matrix_case}.json" vulkan ${pose_matrix_mode})
+                    set_tests_properties(motionbricks-soma-vulkan-pose-matrix-${motion}-${pose_matrix_case} PROPERTIES
+                        RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "max=0 mismatches=0"
+                        ENVIRONMENT "MOTIONBRICKS_SOMA_NATIVE_F16=1;GGML_VK_VISIBLE_DEVICES=${MOTIONBRICKS_VULKAN_PARITY_DEVICE}")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-qkv.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-nvjet-qkv COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-qkv.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-nvjet-qkv.json" cpu nvjet-qkv-graph)
+        set_tests_properties(motionbricks-soma-nvjet-qkv PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-outproj.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-nvjet-outproj COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-outproj.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-nvjet-outproj.json" cpu nvjet-outproj-graph)
+        set_tests_properties(motionbricks-soma-nvjet-outproj PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-linear2.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-nvjet-split4 COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-token-linear2.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-nvjet-split4.json" cpu nvjet-split4-graph)
+        set_tests_properties(motionbricks-soma-nvjet-split4 PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-external-cond2.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-nvjet-cond2 COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-root-external-cond2.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-nvjet-cond2.json" cpu nvjet-split4-graph)
+        set_tests_properties(motionbricks-soma-nvjet-cond2 PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-pose-score.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-nvjet-scores COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/zombie-pose-score.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-nvjet-scores.json" cpu nvjet-scores-graph)
+        set_tests_properties(motionbricks-soma-nvjet-scores PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/sit-root-attention-values.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+        add_test(NAME motionbricks-soma-attention-tail COMMAND motionbricks-soma-matmul-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/sit-root-attention-values.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-attention-tail.json" cpu aligned16-tail-graph)
+        set_tests_properties(motionbricks-soma-attention-tail PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+    endif()
+    foreach(conv_case first split spatial pointwise)
+        if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/zombie-decoder-conv-${conv_case}.gguf" AND
+           EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+            add_test(NAME motionbricks-soma-conv-${conv_case} COMMAND motionbricks-soma-matmul-probe
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+                "${PROJECT_SOURCE_DIR}/generated/soma/zombie-decoder-conv-${conv_case}.gguf"
+                "${CMAKE_CURRENT_BINARY_DIR}/soma-conv-${conv_case}.json" cpu conv-profiled-graph)
+            set_tests_properties(motionbricks-soma-conv-${conv_case} PROPERTIES PASS_REGULAR_EXPRESSION "max=0 mismatches=0")
+        endif()
+    endforeach()
+    target_include_directories(motionbricks-soma-norm-probe PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-norm-probe PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-norm-probe PRIVATE motionbricks_static ggml)
+    target_include_directories(motionbricks-soma-mixed-pose-probe PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-mixed-pose-probe PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-mixed-pose-probe PRIVATE motionbricks_static ggml)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-mixed-pose.gguf" AND
+       EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/pose.gguf")
+        # Tests arithmetic boundaries only; the probe also reports numerical
+        # differences, which are not a full mixed-FP16 parity acceptance gate.
+        add_test(NAME motionbricks-soma-precision-contract COMMAND motionbricks-soma-mixed-pose-probe
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-mixed-pose.gguf"
+            "${CMAKE_CURRENT_BINARY_DIR}/soma-precision-contract.json" cpu)
+    endif()
+    add_executable(motionbricks-soma-api-parity-test soma_api_parity_test.cpp)
+    target_link_libraries(motionbricks-soma-api-parity-test PRIVATE motionbricks_shared ggml)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf")
+        add_test(NAME motionbricks-soma-api-parity COMMAND motionbricks-soma-api-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf")
+        if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+            add_test(NAME motionbricks-soma-api-parity-vulkan COMMAND motionbricks-soma-api-parity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf" vulkan)
+            set_tests_properties(motionbricks-soma-api-parity-vulkan PROPERTIES RUN_SERIAL TRUE)
+        endif()
+    endif()
+    add_executable(motionbricks-soma-batch-parity-test soma_batch_parity_test.cpp)
+    add_executable(motionbricks-soma-feature-batch-parity-test soma_feature_batch_parity_test.cpp)
+    add_executable(motionbricks-soma-motion-batch-parity-test soma_motion_batch_parity_test.cpp)
+    target_include_directories(motionbricks-soma-motion-batch-parity-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-motion-batch-parity-test PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-motion-batch-parity-test PRIVATE motionbricks_static ggml)
+    if(MOTIONBRICKS_ENABLE_SOMA_CALIBRATED_TESTS)
+        set(soma_calibration_root "${PROJECT_SOURCE_DIR}/generated/soma")
+        set(soma_rsqrt "${soma_calibration_root}/rsqrt-mantissa-table/rsqrt-sm120-corrections.bin")
+        set(soma_exp2 "${soma_calibration_root}/exp2-fraction-table/exp2-sm120-corrections.bin")
+        set(soma_motion_fixtures)
+        foreach(chain chain-walk-half-cpu chain-sit-half-cpu-coverage chain-zombie-half-cpu-coverage)
+            list(APPEND soma_motion_fixtures "${soma_calibration_root}/${chain}/step-000/playback/playback.gguf")
+        endforeach()
+        foreach(asset "${soma_rsqrt}" "${soma_exp2}" ${soma_motion_fixtures}
+                      "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/manifest.json")
+            if(NOT EXISTS "${asset}")
+                message(FATAL_ERROR "SOMA calibrated parity requires ${asset}; see reference/README.md")
+            endif()
+        endforeach()
+        foreach(chain walk sit zombie)
+            if(chain STREQUAL "walk")
+                set(soma_api_chain "chain-walk-half-cpu")
+            else()
+                set(soma_api_chain "chain-${chain}-half-cpu-coverage")
+            endif()
+            add_test(NAME motionbricks-soma-api-calibrated-${chain} COMMAND motionbricks-soma-api-parity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+                "${soma_calibration_root}/${soma_api_chain}/step-000/playback/playback.gguf"
+                cpu "${soma_rsqrt}" "${soma_exp2}")
+            set_tests_properties(motionbricks-soma-api-calibrated-${chain} PROPERTIES RUN_SERIAL TRUE)
+        endforeach()
+        add_test(NAME motionbricks-soma-motion-batch-calibrated COMMAND motionbricks-soma-motion-batch-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" cpu mixed-fp16 ${soma_motion_fixtures})
+        set_tests_properties(motionbricks-soma-motion-batch-calibrated PROPERTIES RUN_SERIAL TRUE
+            ENVIRONMENT "MOTIONBRICKS_SOMA_ALIGNED_MATMUL_TRIAL=1;MOTIONBRICKS_SOMA_WELFORD_TRIAL=1;MOTIONBRICKS_SOMA_RSQRT_TABLE=${soma_rsqrt};MOTIONBRICKS_SOMA_EXP2_TABLE=${soma_exp2}")
+    endif()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-io/playback.gguf" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/height-stress-low-io/playback.gguf")
+        add_test(NAME motionbricks-soma-motion-batch-parity COMMAND motionbricks-soma-motion-batch-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" cpu
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf"
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-io/playback.gguf"
+            "${PROJECT_SOURCE_DIR}/generated/soma/height-stress-low-io/playback.gguf")
+        if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+            add_test(NAME motionbricks-soma-motion-batch-parity-vulkan COMMAND motionbricks-soma-motion-batch-parity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" vulkan
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-io/playback.gguf"
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-io/playback.gguf"
+                "${PROJECT_SOURCE_DIR}/generated/soma/height-stress-low-io/playback.gguf")
+            set_tests_properties(motionbricks-soma-motion-batch-parity-vulkan PROPERTIES RUN_SERIAL TRUE)
+        endif()
+    endif()
+    target_include_directories(motionbricks-soma-feature-batch-parity-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-feature-batch-parity-test PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-feature-batch-parity-test PRIVATE motionbricks_static ggml)
+    target_include_directories(motionbricks-soma-batch-parity-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-batch-parity-test PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-batch-parity-test PRIVATE motionbricks_static ggml)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-four16-fixtures/pose.gguf")
+        add_test(NAME motionbricks-soma-batch-parity COMMAND motionbricks-soma-batch-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}"
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf"
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-four16-fixtures/pose.gguf")
+        if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-fixtures/pose.gguf")
+            add_test(NAME motionbricks-soma-feature-batch-parity COMMAND motionbricks-soma-feature-batch-parity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" cpu
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf"
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-four16-fixtures/pose.gguf"
+                "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-fixtures/pose.gguf")
+            if(MOTIONBRICKS_ENABLE_VULKAN AND MOTIONBRICKS_ENABLE_VULKAN_PARITY_TESTS)
+                add_test(NAME motionbricks-soma-feature-batch-parity-vulkan COMMAND motionbricks-soma-feature-batch-parity-test
+                    "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" vulkan
+                    "${PROJECT_SOURCE_DIR}/generated/soma/walk-one-fixtures/pose.gguf"
+                    "${PROJECT_SOURCE_DIR}/generated/soma/walk-four16-fixtures/pose.gguf"
+                    "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-fixtures/pose.gguf")
+                set_tests_properties(motionbricks-soma-feature-batch-parity-vulkan PROPERTIES RUN_SERIAL TRUE)
+            endif()
+        endif()
+    endif()
+    add_executable(motionbricks-soma-run "${PROJECT_SOURCE_DIR}/src/soma_runner.cpp")
+    target_include_directories(motionbricks-soma-run PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(motionbricks-soma-run PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-run PRIVATE motionbricks_static ggml)
+    add_executable(motionbricks-soma-pose-parity-test soma_pose_parity_test.cpp)
+    add_executable(motionbricks-soma-playback-parity-test soma_playback_parity_test.cpp)
+    target_include_directories(motionbricks-soma-playback-parity-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(motionbricks-soma-playback-parity-test PRIVATE motionbricks_static ggml)
+    foreach(chain IN ITEMS chain-walk-half-cpu chain-sit-half-cpu-coverage chain-zombie-half-cpu-coverage)
+        foreach(step IN ITEMS 000 001 002)
+            set(encoder_fixture "${PROJECT_SOURCE_DIR}/generated/soma/${chain}/step-${step}/playback/playback.gguf")
+            if(EXISTS "${encoder_fixture}")
+                add_test(NAME motionbricks-soma-encoder-${chain}-${step}
+                    COMMAND motionbricks-soma-playback-parity-test "${encoder_fixture}" --exact-encoding)
+                add_test(NAME motionbricks-soma-playback-${chain}-${step}
+                    COMMAND motionbricks-soma-playback-parity-test "${encoder_fixture}" --exact-playback)
+            endif()
+        endforeach()
+    endforeach()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-io/playback.gguf")
+        add_test(NAME motionbricks-soma-playback-parity COMMAND motionbricks-soma-playback-parity-test
+            "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-io/playback.gguf")
+    endif()
+    if(EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/pose.gguf" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-fixtures/pose.gguf")
+        add_test(NAME motionbricks-soma-walk-parity COMMAND motionbricks-soma-pose-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${PROJECT_SOURCE_DIR}/generated/soma/walk-soma-fixtures/pose.gguf")
+    endif()
+    target_include_directories(motionbricks-soma-pose-parity-test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src" "${MOTIONBRICKS_GGML_SOURCE_DIR}/include")
+    target_compile_definitions(motionbricks-soma-pose-parity-test PRIVATE MOTIONBRICKS_HAVE_GGML=1)
+    target_link_libraries(motionbricks-soma-pose-parity-test PRIVATE motionbricks_static ggml)
+    foreach(height_case low high)
+        set(height_fixture "${PROJECT_SOURCE_DIR}/generated/soma/height-stress-${height_case}-fixtures/pose.gguf")
+        if(EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/pose.gguf" AND EXISTS "${height_fixture}")
+            add_test(NAME motionbricks-soma-height-${height_case}-parity COMMAND motionbricks-soma-pose-parity-test
+                "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${height_fixture}")
+        endif()
+    endforeach()
+    if(EXISTS "${MOTIONBRICKS_SOMA_TEST_BUNDLE}/pose.gguf" AND
+       EXISTS "${PROJECT_SOURCE_DIR}/generated/soma/fixtures/pose.gguf")
+        add_test(NAME motionbricks-soma-pose-parity COMMAND motionbricks-soma-pose-parity-test
+            "${MOTIONBRICKS_SOMA_TEST_BUNDLE}" "${PROJECT_SOURCE_DIR}/generated/soma/fixtures/pose.gguf")
+    endif()
+endif()
 
 add_executable(motionbricks-inference-api-test inference_api_test.c)
 target_link_libraries(motionbricks-inference-api-test PRIVATE motionbricks::motionbricks)
@@ -177,6 +640,20 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    set(MOTIONBRICKS_SOMA_REFERENCE_PYTHON "${Python3_EXECUTABLE}" CACHE FILEPATH
+        "Python interpreter with numpy and torch for SOMA reference-tool tests")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=PYTHONPATH
+            "${MOTIONBRICKS_SOMA_REFERENCE_PYTHON}" -c "import numpy, torch"
+        RESULT_VARIABLE MOTIONBRICKS_SOMA_TEST_DEPS
+        OUTPUT_QUIET ERROR_QUIET)
+    if(MOTIONBRICKS_SOMA_TEST_DEPS EQUAL 0)
+        add_test(NAME motionbricks-reference-soma-tools
+            COMMAND "${CMAKE_COMMAND}" -E env --unset=PYTHONPATH
+                "${MOTIONBRICKS_SOMA_REFERENCE_PYTHON}" -m unittest test_soma_tools.py)
+        set_tests_properties(motionbricks-reference-soma-tools PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/reference")
+    endif()
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" -c "import numpy, safetensors"
         RESULT_VARIABLE MOTIONBRICKS_SESSION_TEST_DEPS)
@@ -359,4 +836,19 @@ if(MOTIONBRICKS_SANITIZE)
             target_link_options(${target} PRIVATE -fsanitize=address,undefined)
         endif()
     endforeach()
+endif()
+
+add_executable(motionbricks-retarget-api-test retarget_api_test.cpp)
+target_include_directories(motionbricks-retarget-api-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(motionbricks-retarget-api-test PRIVATE motionbricks_static)
+add_test(NAME motionbricks-retarget-api COMMAND motionbricks-retarget-api-test)
+if(MOTIONBRICKS_ENABLE_FUZZERS)
+    add_executable(motionbricks-retarget-fuzz retarget_fuzz.cpp)
+    target_link_libraries(motionbricks-retarget-fuzz PRIVATE motionbricks_static)
+    target_compile_options(motionbricks-retarget-fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(motionbricks-retarget-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
+if(MOTIONBRICKS_SANITIZE)
+    target_compile_options(motionbricks-retarget-api-test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(motionbricks-retarget-api-test PRIVATE -fsanitize=address,undefined)
 endif()

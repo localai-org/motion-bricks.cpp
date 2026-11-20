@@ -1,0 +1,301 @@
+diff --git a/src/ggml-cpu/llamafile/sgemm.cpp b/src/ggml-cpu/llamafile/sgemm.cpp
+index 99b7d5af..7628d5ab 100644
+--- a/src/ggml-cpu/llamafile/sgemm.cpp
++++ b/src/ggml-cpu/llamafile/sgemm.cpp
+@@ -49,13 +49,34 @@
+ #endif
+ 
+ #include "sgemm.h"
++#include "sgemm-experiment.h"
+ #include "ggml-impl.h"
+ #include "ggml-cpu-impl.h"
+ #include "ggml-quants.h"
+ #include "simd-mappings.h"
+ 
++#include <algorithm>
+ #include <array>
++#include <memory>
++#include <mutex>
+ #include <type_traits>
++#include <vector>
++
++#ifndef GGML_TINYBLAS_EXPERIMENT
++#define GGML_TINYBLAS_EXPERIMENT 0
++#endif
++
++#ifndef GGML_TINYBLAS_PREFETCH_DISTANCE
++#define GGML_TINYBLAS_PREFETCH_DISTANCE 0
++#endif
++
++#ifndef GGML_TINYBLAS_PREFETCH_B
++#define GGML_TINYBLAS_PREFETCH_B 0
++#endif
++
++#ifndef GGML_TINYBLAS_K_BLOCK
++#define GGML_TINYBLAS_K_BLOCK 256
++#endif
+ 
+ #ifdef _MSC_VER
+ #define NOINLINE __declspec(noinline)
+@@ -481,6 +502,51 @@ static constexpr inline int64_t BLOC_POS(int64_t ib, int64_t ibN, int64_t bloc_s
+     return ib < ibN ? ib * bloc_size : ibN * bloc_size + (ib - ibN) * (bloc_size - 1);
+ }
+ 
++#if GGML_TINYBLAS_EXPERIMENT == 3
++struct packed_f32_matrix {
++    const float * source;
++    int64_t m;
++    int64_t k;
++    int64_t lda;
++    std::vector<float> values;
++};
++
++// Diagnostic-only persistent packing. Four source rows are interleaved one
++// vector block at a time so the four loads made by the F32 microkernel become
++// one sequential cache-line stream. The first-call packing cost is excluded by
++// the benchmark warmup.
++const float * pack_f32_rows4(const float * source, int64_t m, int64_t k, int64_t lda) {
++    static std::mutex mutex;
++    static std::vector<std::unique_ptr<packed_f32_matrix>> cache;
++    const std::lock_guard lock(mutex);
++    for (const auto & entry : cache)
++        if (entry->source == source && entry->m == m && entry->k == k && entry->lda == lda)
++            return entry->values.data();
++
++    auto entry = std::make_unique<packed_f32_matrix>();
++    entry->source = source;
++    entry->m = m;
++    entry->k = k;
++    entry->lda = lda;
++    entry->values.resize(static_cast<size_t>(m * k));
++    constexpr int64_t rows = 4;
++    constexpr int64_t block = 16;
++    for (int64_t row = 0; row < m; row += rows) {
++        const int64_t group = row / rows;
++        for (int64_t column = 0; column < k; column += block) {
++            for (int64_t lane = 0; lane < rows; ++lane) {
++                float * destination = entry->values.data() + group * rows * k +
++                    (column / block) * rows * block + lane * block;
++                std::copy_n(source + (row + lane) * lda + column, block, destination);
++            }
++        }
++    }
++    const float * result = entry->values.data();
++    cache.push_back(std::move(entry));
++    return result;
++}
++#endif
++
+ template <int KN, typename D, typename V, typename TA, typename TB, typename TC>
+ class tinyBLAS {
+   public:
+@@ -494,8 +560,33 @@ class tinyBLAS {
+     bool matmul(int64_t m, int64_t n) {
+         if (k % KN != 0)
+             return false;
++#if GGML_TINYBLAS_EXPERIMENT == 3
++        if constexpr (std::is_same_v<TA, float>) {
++            if (m % 4 != 0 || KN != 16)
++                return false;
++            A = pack_f32_rows4(reinterpret_cast<const float *>(A), m, k, lda);
++            packed_a = true;
++        }
++#endif
+         // compute RM for only need tile with size RM&RM-1
+ #if VECTOR_REGISTERS == 32
++#if GGML_TINYBLAS_EXPERIMENT == 1
++        if (m % 16 == 0 && (m/16 >= params->nth)) {
++            const int64_t SIZE_N = BLOCK_SIZE<10>(n);
++            mnpack<2, 10, 8>(m, n, SIZE_N, 12);
++            return true;
++        }
++        if (m % 8 == 0) {
++            const int64_t SIZE_N = BLOCK_SIZE<10>(n);
++            mnpack<2, 10, 4>(m, n, SIZE_N, 12);
++            return true;
++        }
++        if (m % 4 == 0) {
++            const int64_t SIZE_N = BLOCK_SIZE<10>(n);
++            mnpack<2, 10, 2>(m, n, SIZE_N, 12);
++            return true;
++        }
++#else
+         if (m % 16 == 0 && (m/16 >= params->nth)) {
+             const int64_t SIZE_N = BLOCK_SIZE<6>(n);
+             mnpack<4, 6, 4>(m, n, SIZE_N, 12);
+@@ -511,6 +602,7 @@ class tinyBLAS {
+             mnpack<4, 6, 1>(m, n, SIZE_N, 12);
+             return true;
+         }
++#endif
+ #else  // VECTOR_REGISTERS == 16
+         if (m % 16 == 0 && (m/16 >= params->nth)) {
+             const int64_t SIZE_N = BLOCK_SIZE<3>(n);
+@@ -532,6 +624,70 @@ class tinyBLAS {
+     }
+ 
+   private:
++    inline const TA * address_a(int64_t row, int64_t column) const {
++#if GGML_TINYBLAS_EXPERIMENT == 3
++        if constexpr (std::is_same_v<TA, float>) {
++            if (packed_a) {
++                constexpr int64_t rows = 4;
++                return A + (row / rows) * rows * k +
++                    (column / KN) * rows * KN + (row % rows) * KN;
++            }
++        }
++#endif
++        return A + lda * row + column;
++    }
++
++    template <int RM, int RN>
++    inline void prefetch(int64_t ii, int64_t jj, int64_t l, int64_t limit) const {
++#if GGML_TINYBLAS_EXPERIMENT == 2 && GGML_TINYBLAS_PREFETCH_DISTANCE > 0 && defined(__GNUC__)
++        const int64_t next = l + GGML_TINYBLAS_PREFETCH_DISTANCE * KN;
++        if (next < limit) {
++            for (int64_t i = 0; i < RM; ++i)
++                __builtin_prefetch(address_a(ii + i, next), 0, 3);
++#if GGML_TINYBLAS_PREFETCH_B
++            for (int64_t j = 0; j < RN; ++j)
++                __builtin_prefetch(B + ldb * (jj + j) + next, 0, 3);
++#endif
++        }
++#else
++        (void) ii; (void) jj; (void) l; (void) limit;
++#endif
++    }
++
++    template <int RM, int RN>
++    inline void gemm_bloc_range(int64_t ii, int64_t jj, int64_t begin, int64_t end,
++                                D (*state)[RM]) {
++        D Cv[RN][RM];
++        for (int64_t j = 0; j < RN; ++j)
++            for (int64_t i = 0; i < RM; ++i)
++                Cv[j][i] = state[j][i];
++        for (int64_t l = begin; l < end; l += KN) {
++            prefetch<RM, RN>(ii, jj, l, end);
++            if constexpr (RM <= RN) {
++                V Av[RM];
++                for (int64_t i = 0; i < RM; ++i)
++                    Av[i] = load<V>(address_a(ii + i, l));
++                for (int64_t j = 0; j < RN; ++j) {
++                    V Bv = load<V>(B + ldb * (jj + j) + l);
++                    for (int64_t i = 0; i < RM; ++i)
++                        Cv[j][i] = madd(Av[i], Bv, Cv[j][i]);
++                }
++            } else {
++                V Bv[RN];
++                for (int64_t j = 0; j < RN; ++j)
++                    Bv[j] = load<V>(B + ldb * (jj + j) + l);
++                for (int64_t i = 0; i < RM; ++i) {
++                    V Av = load<V>(address_a(ii + i, l));
++                    for (int64_t j = 0; j < RN; ++j)
++                        Cv[j][i] = madd(Av, Bv[j], Cv[j][i]);
++                }
++            }
++        }
++        for (int64_t j = 0; j < RN; ++j)
++            for (int64_t i = 0; i < RM; ++i)
++                state[j][i] = Cv[j][i];
++    }
++
+     template <int RM, int RN, int BM>
+     inline void mnpack(int64_t m, int64_t n, int64_t SIZE_N, int64_t BN) {
+         if (SIZE_N == RN) {
+@@ -549,11 +705,12 @@ class tinyBLAS {
+     inline void gemm_bloc(int64_t ii, int64_t jj) {
+         D Cv[RN][RM] = {};
+         for (int64_t l = 0; l < k; l += KN) {
++            prefetch<RM, RN>(ii, jj, l, k);
+             // help compiler for op order.
+             if constexpr (RM <= RN) {
+                 V Av[RM];
+                 for (int64_t i = 0; i < RM; ++i) {
+-                    Av[i] = load<V>(A + lda * (ii + i) + l);
++                    Av[i] = load<V>(address_a(ii + i, l));
+                 }
+                 for (int64_t j = 0; j < RN; ++j) {
+                     V Bv = load<V>(B + ldb * (jj + j) + l);
+@@ -567,7 +724,7 @@ class tinyBLAS {
+                     Bv[j] = load<V>(B + ldb * (jj + j) + l);
+                 }
+                 for (int64_t i = 0; i < RM; ++i) {
+-                    V Av = load<V>(A + lda * (ii + i) + l);
++                    V Av = load<V>(address_a(ii + i, l));
+                     for (int64_t j = 0; j < RN; ++j) {
+                         Cv[j][i] = madd(Av, Bv[j], Cv[j][i]);
+                     }
+@@ -579,6 +736,31 @@ class tinyBLAS {
+                 C[ldc * (jj + j) + (ii + i)] = hsum(Cv[j][i]);
+     }
+ 
++#if GGML_TINYBLAS_EXPERIMENT == 4
++    template <int RM, int RN>
++    inline bool gemm_kblocked(int64_t ii, int64_t jj0, int64_t jj1, int64_t jj2) {
++        constexpr int64_t max_columns = 16;
++        const int64_t columns = jj2 - jj0;
++        if (columns <= 0 || columns > max_columns)
++            return false;
++        alignas(64) D state[max_columns][RM] = {};
++        for (int64_t begin = 0; begin < k; begin += GGML_TINYBLAS_K_BLOCK) {
++            const int64_t end = std::min<int64_t>(k, begin + GGML_TINYBLAS_K_BLOCK);
++            int64_t jj = jj0;
++            for (; jj < jj1; jj += RN)
++                gemm_bloc_range<RM, RN>(ii, jj, begin, end, state + (jj - jj0));
++            if constexpr (RN > 1)
++                for (; jj < jj2; jj += RN - 1)
++                    gemm_bloc_range<RM, RN - 1>(ii, jj, begin, end, state + (jj - jj0));
++            GGML_ASSERT(jj == jj2);
++        }
++        for (int64_t j = 0; j < columns; ++j)
++            for (int64_t i = 0; i < RM; ++i)
++                C[ldc * (jj0 + j) + (ii + i)] = hsum(state[j][i]);
++        return true;
++    }
++#endif
++
+     template <int RM, int RN, int BM>
+     NOINLINE void gemm(int64_t m, int64_t n, int64_t BN) {
+         GGML_ASSERT(m % (RM * BM) == 0);
+@@ -612,6 +794,10 @@ class tinyBLAS {
+             const int64_t jj1 = jj2 < jj_RN * RN ? jj2 : jj_RN * RN;
+ 
+             for (int64_t bi = 0; bi < BM * RM; bi += RM) {
++#if GGML_TINYBLAS_EXPERIMENT == 4
++                if (gemm_kblocked<RM, RN>(ii + bi, jj0, jj1, jj2))
++                    continue;
++#endif
+                 int64_t jj = jj0;
+                 for (; jj < jj1; jj += RN) {
+                     gemm_bloc<RM, RN>(ii + bi, jj);
+@@ -632,13 +818,16 @@ class tinyBLAS {
+     }
+ 
+     const ggml_compute_params * params;
+-    const TA *const A;
++    const TA * A;
+     const TB *const B;
+     TC *const C;
+     const int64_t k;
+     const int64_t lda;
+     const int64_t ldb;
+     const int64_t ldc;
++#if GGML_TINYBLAS_EXPERIMENT == 3
++    bool packed_a = false;
++#endif
+ };
+ 
+ #if defined(__riscv_v_intrinsic)
+diff --git a/src/ggml-cpu/llamafile/sgemm-experiment.h b/src/ggml-cpu/llamafile/sgemm-experiment.h
+new file mode 100644
+index 00000000..c88ee3e6
+--- /dev/null
++++ b/src/ggml-cpu/llamafile/sgemm-experiment.h
+@@ -0,0 +1,7 @@
++#pragma once
++
++// Local profiling controls. Zero preserves upstream tinyBLAS behavior.
++#define GGML_TINYBLAS_EXPERIMENT 0
++#define GGML_TINYBLAS_PREFETCH_DISTANCE 0
++#define GGML_TINYBLAS_PREFETCH_B 0
++#define GGML_TINYBLAS_K_BLOCK 256

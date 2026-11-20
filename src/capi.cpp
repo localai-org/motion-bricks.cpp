@@ -3,6 +3,7 @@
 #include "error.hpp"
 #include "agent.hpp"
 #include "handles.hpp"
+#include "inference_handles.hpp"
 #include "model.hpp"
 #include "style.hpp"
 
@@ -306,6 +307,7 @@ mb_status mb_model_load(const char * bundle_directory, const mb_runtime_options 
             return fail(MB_BACKEND_UNAVAILABLE, error, error_capacity,
                         "this build has no Vulkan backend");
 #endif
+        if(options&&options->model_kind==MB_MODEL_SOMA)return motionbricks::detail::load_soma_model(bundle_directory,options,output,error,error_capacity);
         auto model = std::make_unique<mb_model>();
         std::string reason;
         const auto status = motionbricks::detail::load_model_bundle(bundle_directory, options, *model, reason);
@@ -330,6 +332,7 @@ mb_status mb_model_get_parameter_count(const mb_model * value, uint64_t * output
 mb_status mb_model_get_joint_count(const mb_model * value, uint32_t * output,
                                    char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(value&&value->kind==MB_MODEL_SOMA)return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA has a caller-configured output skeleton; inspect the inference request skeleton or motion joint count");
         if (value == nullptr || output == nullptr)
             return fail(MB_INVALID_ARGUMENT, error, error_capacity, "model or output is null");
         *output = static_cast<std::uint32_t>(value->joint_names.size());
@@ -340,6 +343,7 @@ mb_status mb_model_get_joint_count(const mb_model * value, uint32_t * output,
 mb_status mb_model_get_joint_name(const mb_model * value, uint32_t joint, const char ** output,
                                   char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(value&&value->kind==MB_MODEL_SOMA)return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA has a caller-configured output skeleton; inspect the inference request skeleton or motion joint count");
         if (value == nullptr || output == nullptr)
             return fail(MB_INVALID_ARGUMENT, error, error_capacity, "model or output is null");
         if (joint >= value->joint_names.size())
@@ -352,6 +356,7 @@ mb_status mb_model_get_joint_name(const mb_model * value, uint32_t joint, const 
 mb_status mb_model_get_joint_parent(const mb_model * value, uint32_t joint, int32_t * output,
                                     char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(value&&value->kind==MB_MODEL_SOMA)return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA has a caller-configured output skeleton; inspect the inference request skeleton or motion joint count");
         if (value == nullptr || output == nullptr)
             return fail(MB_INVALID_ARGUMENT, error, error_capacity, "model or output is null");
         if (joint >= value->joint_parents.size())
@@ -365,6 +370,7 @@ mb_status mb_model_get_neutral_joint_position(const mb_model * value, uint32_t j
                                               float * x, float * y, float * z,
                                               char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(value&&value->kind==MB_MODEL_SOMA)return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA has a caller-configured output skeleton; inspect the inference request skeleton or motion joint count");
         if (value == nullptr || x == nullptr || y == nullptr || z == nullptr)
             return fail(MB_INVALID_ARGUMENT, error, error_capacity, "model or output is null");
         if (joint >= value->joint_names.size() || value->neutral_joints.size() != value->joint_names.size() * 3U)
@@ -379,6 +385,7 @@ mb_status mb_model_get_neutral_joint_position(const mb_model * value, uint32_t j
 mb_status mb_style_load(const mb_model * model, const char * style_path, mb_style ** output,
                         char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(model&&model->kind==MB_MODEL_SOMA) { if(output)*output=nullptr;return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA uses pose constraints through mb_inference_request/mb_model_infer; G1 style and agent planning is unsupported"); }
         if (output == nullptr) return fail(MB_INVALID_ARGUMENT, error, error_capacity, "output is null");
         *output = nullptr;
         if (model == nullptr || style_path == nullptr || *style_path == '\0')
@@ -425,6 +432,7 @@ mb_status mb_style_get_speed(const mb_style * value, float * output, char * erro
 mb_status mb_agent_create(const mb_model * model, mb_agent ** output,
                           char * error, uint64_t error_capacity) {
     return guard(error, error_capacity, [&]() -> mb_status {
+        if(model&&model->kind==MB_MODEL_SOMA) { if(output)*output=nullptr;return fail(MB_INCOMPATIBLE_MODEL,error,error_capacity,"SOMA uses pose constraints through mb_inference_request/mb_model_infer; G1 style and agent planning is unsupported"); }
         if (output == nullptr) return fail(MB_INVALID_ARGUMENT, error, error_capacity, "output is null");
         *output = nullptr;
         if (model == nullptr) return fail(MB_INVALID_ARGUMENT, error, error_capacity, "model is null");

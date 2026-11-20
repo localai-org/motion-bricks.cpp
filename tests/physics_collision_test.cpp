@@ -23,7 +23,7 @@ void check_collision_geometry(mb_physics * physics,const char * scene,const floa
     assert(mb_physics_trace(physics,4,state.data(),state.size(),&n,error,sizeof(error))==MB_OK && n==65);
     assert(mb_physics_trace(physics,5,trace.data(),trace.size(),&n,error,sizeof(error))==MB_OK && n==348);
     mjModel * model=mj_loadXML(scene,nullptr,error,sizeof(error));assert(model);
-#if mjVERSION_HEADER == 3012000
+#if mjVERSION_HEADER >= 3012000
     model->opt.enableflags |= mjENBL_SLEEP;
     for(int tree=0;tree<model->ntree;++tree) model->tree_sleep_policy[tree]=mjSLEEP_NEVER;
 #endif
@@ -64,7 +64,7 @@ void check_collision_geometry(mb_physics * physics,const char * scene,const floa
         std::fill_n(data->ctrl,model->nu,0.0);
         for(int j=0;j<29;++j) {
             const int actuator=j<22?j:j+7;
-#if mjVERSION_HEADER == 3012000
+#if mjVERSION_HEADER >= 3012000
             assert(model->actuator_ctrlnum[actuator]==1);
             data->ctrl[model->actuator_ctrladr[actuator]]=trace[step*87+58+j];
 #else

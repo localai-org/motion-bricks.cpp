@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 typedef struct mb_physics mb_physics;
-/* Linked engine version (e.g. "3.12.0"), copied into a caller-owned buffer.
+/* Linked engine version (e.g. "4.0.1"), copied into a caller-owned buffer.
    No model/session required. Disabled builds return BACKEND_UNAVAILABLE;
    mismatched compile/runtime SDKs return INCOMPATIBLE_MODEL. */
 MB_API mb_status mb_physics_engine_version(char * version, uint64_t version_capacity,
